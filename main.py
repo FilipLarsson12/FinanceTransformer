@@ -1,6 +1,16 @@
 import torch
 import torch.nn as nn
 
+# class that defines the self attention layers
+class SelfAttentionLayer(nn.Module):
+
+    def __init__(self, config):
+        # we use a linear layer to produce the k, q and v.
+        # we use the same dimensionality for them as the embd_dim
+        self.calc_kqv = nn.Linear(config.embd_dim, config.embd_dim * 3)
+
+
+# model class
 class FinanceTransformer(nn.Module):
 
     def __init__(self, config):
@@ -30,5 +40,5 @@ model = FinanceTransformer(model_config)
 data = model(data)
 
 print("Data shape after being processed by the model: ", data.shape)
-
+print(data)
 
