@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -11,17 +12,31 @@ class SelfAttentionLayer(nn.Module):
         self.config = config
         self.calc_kqv = nn.Linear(config.embd_dim, config.embd_dim * 3)
 
+        # register parameter for the lower triangular mask-matrix
+        self.register_buffer("bias", 
+        torch.tril(torch.ones(config.block_size, config.block_size))
+        .view(1, config.block_size, config.block_size))
+
+
     def forward(self, x):
         kqv = self.calc_kqv(x)
         print("kqv shape: ", kqv.shape)
         print("kqv: ", kqv)
+        # splitting so I have key, query and value 
         k, q, v = kqv.split(self.config.embd_dim, dim=-1)
         print("k shape: ", k.shape)
-        print("k: ", k)
         print("q shape: ", q.shape)
-        print("q: ", q)
         print("v shape: ", v.shape)
-        print("v: ", v)
+        # calculating how much the embeddings "care" about one another
+        # i.e calculating how much information should flow between the different embeddings
+        k = k.transpose(-2, -1)
+        keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+        print("Key: ", k)
+        print("Query: ", q)
+        print("Keyquery_matrix: ", keyquery_matrix)
+        print("Keyquery_matrix shape: ", keyquery_matrix.shape)
+
+
         return x
 
 # model class
@@ -39,16 +54,18 @@ class FinanceTransformer(nn.Module):
         return x
 
 # create some data and reshape it so that it can be processed by the model
-data = torch.tensor([[0.1, 0.3, 0.5, 0.7, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]])
+data = torch.tensor([[0.1, 0.3, 0.5]])
 print("Original input shape:", data.shape)
-data = data.view(1, 10, 1)
+data = data.view(1, 3, 1)
 print("After reshaping to (batch_size, sequence_length, input_dim):", data.shape)
 
+# model config class
 @dataclass
 class Config():
     input_dim = 1
     embd_dim = 2
-    
+    block_size = 3
+#init
 model_config = Config()
 
 model = FinanceTransformer(model_config)
