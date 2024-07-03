@@ -12,8 +12,10 @@ class SelfAttentionLayer(nn.Module):
         # we use a linear layer to produce the k, q and v.
         # we use the same dimensionality for them as the embd_dim
         self.config = config
+        # to calculate k, q and v
         self.calc_kqv = nn.Linear(config.embd_dim, config.embd_dim * 3)
-
+        # final proj before return
+        self.proj = nn.Linear(config.embd_dim, config.embd_dim)
         # register parameter for the lower triangular mask-matrix
         self.register_buffer("bias", 
         torch.tril(torch.ones(config.block_size, config.block_size))
@@ -44,6 +46,8 @@ class SelfAttentionLayer(nn.Module):
         print("Keyquery_matrix shape: ", keyquery_matrix.shape)
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
         print("Keyquery_matrix after mask and softmax: ", keyquery_matrix)
+        print("Value: ", v)
+        print("Value shape: ", v.shape)
 
         return x
 
