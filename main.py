@@ -35,9 +35,8 @@ class SelfAttentionLayer(nn.Module):
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-        # make it impossible for embeddings to get information from embeddings that comes after
         print("Keyquery_matrix before mask: ", keyquery_matrix)
-
+        # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
 
         print("Key: ", k)
@@ -45,10 +44,34 @@ class SelfAttentionLayer(nn.Module):
         print("Keyquery_matrix after mask: ", keyquery_matrix)
         print("Keyquery_matrix shape: ", keyquery_matrix.shape)
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
-        print("Keyquery_matrix after mask and softmax: ", keyquery_matrix)
-        print("Value: ", v)
+        print("Keyquery_matrix after mask and softmax: \n", keyquery_matrix)
+        print("Value: \n", v)
         print("Value shape: ", v.shape)
 
+        # calculate updated embd_values for the embeddings based on how much information should flow between them
+        x = keyquery_matrix @ v # (batch_am, seq_len, seq_len) @ (batch_am, seq_len, embd_dim) = (batch_am, seq_len, embd_dim)
+
+        # final proj
+        x = self.proj(x)
+
+        print("x: \n", x)
+
+        return x
+    
+
+# class that defines a MLP
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.first_proj = nn.Linear(config.embd_dim, 4 * config.embd_dim)
+        self.gelu = nn.GELU(approximate='tanh')
+        self.final_proj = nn.Linear(config.embd_dim * 4, config.embd_dim)
+    
+    def forward(self, x):
+        x = self.first_proj(x)
+        x = self.gelu(x)
+        x = self.final_proj(x)
         return x
 
 # model class
