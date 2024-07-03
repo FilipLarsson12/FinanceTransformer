@@ -23,6 +23,7 @@ class SelfAttentionLayer(nn.Module):
         
 
     def forward(self, x):
+        print("x that produces kqv: ", x)
         kqv = self.calc_kqv(x)
         print("kqv shape: ", kqv.shape)
         print("kqv: ", kqv)
@@ -35,14 +36,14 @@ class SelfAttentionLayer(nn.Module):
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-        print("Keyquery_matrix before mask: ", keyquery_matrix)
+        print("Keyquery_matrix before mask: \n", keyquery_matrix)
         # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
 
-        print("Key: ", k)
-        print("Query: ", q)
-        print("Keyquery_matrix after mask: ", keyquery_matrix)
-        print("Keyquery_matrix shape: ", keyquery_matrix.shape)
+        print("Key: \n", k)
+        print("Query: \n", q)
+        print("Keyquery_matrix after mask: \n", keyquery_matrix)
+        print("Keyquery_matrix shape: \n", keyquery_matrix.shape)
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
         print("Keyquery_matrix after mask and softmax: \n", keyquery_matrix)
         print("Value: \n", v)
@@ -88,6 +89,7 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = self.normlayer_1(x)
+        print("x after normlayer inside block: ", x)
         x = self.attentionlayer(x)
         x = self.normlayer_2(x)
         x = self.mlp(x)
@@ -114,9 +116,12 @@ class FinanceTransformer(nn.Module):
     def forward(self, x):
         # input dim is: (batch_am, seq_len, 1)
         x = self.embedding(x) # (batch_am, seq_len, embd_dim)
-        for block in self.layers():
+        print("Embeddings from FT: ", x)
+        for block in self.layers:
             x = block(x) # (batch_am, seq_len, embd_dim)
+        print("x after FT blocks: ", x)
         x = self.final_normlayer(x) # (batch_am, seq_len, embd_dim)
+        print("x before final proj: ", x)
         x = self.predictionlayer(x) # (batch_am, seq_len, 1)
         # now we have predictions at every position in the sequence in every batch
         return x
@@ -127,25 +132,33 @@ class FinanceTransformer(nn.Module):
 # training run
 
 # create some data and reshape it so that it can be processed by the model
-data = torch.tensor([[0.1, 0.3, 0.5]])
-print("Original input shape:", data.shape)
+data = torch.tensor([[0.1, 0.7, 2.3]])
 data = data.view(1, 3, 1)
-print("After reshaping to (batch_size, sequence_length, input_dim):", data.shape)
 
 # model config class
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 2
+    embd_dim = 4
     block_size = 3
-    n_layers = 5
+    n_layers = 1
 #init
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 
-data = model(data)
+pred = model(data) 
 
-print("Data shape after being processed by the model: ", data.shape)
+# prints
+print("Original input shape:", data.shape)
+print("After reshaping to (batch_size, sequence_length, input_dim):", data.shape)
+print("Pred shape after the model processed my data: ", pred.shape)
+print("Prediction from model: ", pred)
 
 
+test = torch.tensor([[ 0.1732,  0.3001, 0.5],
+         [ 0.1069,  0.4810, 0.1],
+         [-0.0701,  0.9635, 1]])
+testlayer = nn.LayerNorm(3)
+res = testlayer(test)
+print("res: ", res)
