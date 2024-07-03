@@ -2,6 +2,8 @@ import math
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
+import torch.nn.functional as F
+
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
 
@@ -16,7 +18,7 @@ class SelfAttentionLayer(nn.Module):
         self.register_buffer("bias", 
         torch.tril(torch.ones(config.block_size, config.block_size))
         .view(1, config.block_size, config.block_size))
-
+        
 
     def forward(self, x):
         kqv = self.calc_kqv(x)
@@ -31,11 +33,17 @@ class SelfAttentionLayer(nn.Module):
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+        # make it impossible for embeddings to get information from embeddings that comes after
+        print("Keyquery_matrix before mask: ", keyquery_matrix)
+
+        keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
+
         print("Key: ", k)
         print("Query: ", q)
-        print("Keyquery_matrix: ", keyquery_matrix)
+        print("Keyquery_matrix after mask: ", keyquery_matrix)
         print("Keyquery_matrix shape: ", keyquery_matrix.shape)
-
+        keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
+        print("Keyquery_matrix after mask and softmax: ", keyquery_matrix)
 
         return x
 
