@@ -81,9 +81,9 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.normlayer_1 = nn.LayerNorm()
+        self.normlayer_1 = nn.LayerNorm(config.embd_dim)
         self.attentionlayer = SelfAttentionLayer(config)
-        self.normlayer_2 = nn.LayerNorm()
+        self.normlayer_2 = nn.LayerNorm(config.embd_dim)
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -101,12 +101,30 @@ class FinanceTransformer(nn.Module):
         super().__init__()
         self.config = config
         self.embedding = nn.Linear(config.input_dim, config.embd_dim)
-        self.attentionlayer = SelfAttentionLayer(config)
+        # self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
+
+        self.layers = nn.ModuleList(
+            [
+                Block(config) for _ in range(config.n_layers)
+            ]    
+        )
+        self.final_normlayer = nn.LayerNorm(config.embd_dim)
+        self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
     def forward(self, x):
-        x = self.embedding(x)
-        x = (self.attentionlayer(x))
+        # input dim is: (batch_am, seq_len, 1)
+        x = self.embedding(x) # (batch_am, seq_len, embd_dim)
+        for block in self.layers():
+            x = block(x) # (batch_am, seq_len, embd_dim)
+        x = self.final_normlayer(x) # (batch_am, seq_len, embd_dim)
+        x = self.predictionlayer(x) # (batch_am, seq_len, 1)
+        # now we have predictions at every position in the sequence in every batch
         return x
+
+
+# ----------------------------------------------------------------------------------------
+
+# training run
 
 # create some data and reshape it so that it can be processed by the model
 data = torch.tensor([[0.1, 0.3, 0.5]])
@@ -116,12 +134,13 @@ print("After reshaping to (batch_size, sequence_length, input_dim):", data.shape
 
 # model config class
 @dataclass
-class Config():
+class ModelConfig():
     input_dim = 1
     embd_dim = 2
     block_size = 3
+    n_layers = 5
 #init
-model_config = Config()
+model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 
