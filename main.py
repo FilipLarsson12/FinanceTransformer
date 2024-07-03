@@ -64,15 +64,35 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.first_proj = nn.Linear(config.embd_dim, 4 * config.embd_dim)
+        self.proj_1 = nn.Linear(config.embd_dim, 4 * config.embd_dim)
         self.gelu = nn.GELU(approximate='tanh')
-        self.final_proj = nn.Linear(config.embd_dim * 4, config.embd_dim)
+        self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
     
     def forward(self, x):
-        x = self.first_proj(x)
+        x = self.proj_1(x)
         x = self.gelu(x)
-        x = self.final_proj(x)
+        x = self.proj_2(x)
         return x
+    
+
+# class that defines a "block" in the model, it contains a layernorm to normalize activations, attention layer, MLP layer and another layernorm
+
+class Block(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.normlayer_1 = nn.LayerNorm()
+        self.attentionlayer = SelfAttentionLayer(config)
+        self.normlayer_2 = nn.LayerNorm()
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = self.normlayer_1(x)
+        x = self.attentionlayer(x)
+        x = self.normlayer_2(x)
+        x = self.mlp(x)
+        return x
+
 
 # model class
 class FinanceTransformer(nn.Module):
