@@ -132,26 +132,44 @@ class FinanceTransformer(nn.Module):
 # training run
 
 # create some data and reshape it so that it can be processed by the model
-data = torch.tensor([[0.1, 0.7, 2.3]])
-data = data.view(1, 3, 1)
+data = torch.tensor([
+    [0.1, 0.7, 2.3],
+    [0.4, 0.5, 1.8],
+    [0.3, 1.2, 1.5],
+    [4.1, 0.3, 2.7],
+    [3.2, 1.8, 4.5],
+    [2.9, 2.1, 3.3],
+    [0.2, 3.0, 4.0],
+    [1.0, 2.8, 0.9],
+    [4.3, 4.5, 1.1],
+    [1.5, 2.2, 0.4]
+])
+
+
+
 
 # model config class
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 4
+    embd_dim = 6
     block_size = 3
     n_layers = 1
+
 #init
 model_config = ModelConfig()
+
+data = data.view(data.shape[0], data.shape[1], 1)
+
+print(f"data going into the transformer: {data}")
+print("Original input shape:", data.shape)
 
 model = FinanceTransformer(model_config)
 
 pred = model(data) 
 
 # prints
-print("Original input shape:", data.shape)
-print("After reshaping to (batch_size, sequence_length, input_dim):", data.shape)
+
 print("Pred shape after the model processed my data: ", pred.shape)
 print("Prediction from model: ", pred)
 
