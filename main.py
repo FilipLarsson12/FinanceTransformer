@@ -209,8 +209,8 @@ class DataLoader():
             print(f"ticker_data_price_inputs before reshape: {ticker_data_price_inputs.shape}")
             print(f"ticker_data_targets before reshape: {ticker_data_targets.shape}")
 
-            ticker_data_price_inputs.view(-1, block_size, 1)
-            ticker_data_targets.view(-1, block_size, 1)
+            ticker_data_price_inputs = ticker_data_price_inputs.view(-1, block_size, 1)
+            ticker_data_targets = ticker_data_targets.view(-1, block_size, 1)
 
             print(f"ticker_data_price_inputs after reshape: {ticker_data_price_inputs.shape}")
             print(f"ticker_data_targets after reshape: {ticker_data_targets.shape}")
