@@ -127,22 +127,32 @@ class FinanceTransformer(nn.Module):
         return x
 
 
-
 # dataloader class
 class DataLoader():
 
-  def load_data_from_yfinance(filepath):
+  # Function to normalize the prices
+  def normalize(self, prices):
+      min_price = np.min(prices)
+      max_price = np.max(prices)
+      self.min_price = min_price
+      self.max_price = max_price
+      normalized_prices = (prices - min_price) / (max_price - min_price)
+      return normalized_prices
+
+  def load_data_from_yfinance(self, filepath, startDate, endDate):
 
     # Define the stock ticker and the time period
     ticker = 'AAPL'
-    start_date = '2023-01-01'
-    end_date = '2024-01-01'
+    start_date = startDate
+    end_date = endDate
 
     # Download the data
     data = yf.download(ticker, start=start_date, end=end_date)
 
     # Extract the closing prices
     prices = data['Close'].values
+
+    prices = self.normalize(prices)
 
     # Open (or create if it doesn't exist) the file 'data.txt'
     file_path = 'data.txt'
@@ -201,7 +211,11 @@ model = FinanceTransformer(model_config)
 
 dataloader = DataLoader()
 
-prices = DataLoader.load_data("data.txt", model_config.block_size)
+data_file = "data.txt"
+
+dataloader.load_data_from_yfinance(data_file, startDate='2010-01-01', endDate='2024-01-01')
+
+prices = DataLoader.load_data_from_file("data.txt", model_config.block_size)
 
 print(len(prices))
 
@@ -220,7 +234,7 @@ print("Original input shape:", price_inputs.shape)
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 
 # training loop
