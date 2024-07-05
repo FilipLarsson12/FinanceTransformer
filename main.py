@@ -199,31 +199,38 @@ class DataLoader():
 
         for ticker, prices in data_dict.items():
 
-            # create inputs and targets that have equal indices in their corrsponding matrix
+            # create inputs and targets that have equal indices in their corresponding matrix
             ticker_data_price_inputs = prices[:-1]
             ticker_data_targets = prices[1:]
 
+            # convert them to torch.Tensors
             ticker_data_price_inputs = torch.Tensor(ticker_data_price_inputs)
             ticker_data_targets = torch.Tensor(ticker_data_targets)
 
             print(f"ticker_data_price_inputs before reshape: {ticker_data_price_inputs.shape}")
             print(f"ticker_data_targets before reshape: {ticker_data_targets.shape}")
 
+            # reshape so that each row is of length block_size
             ticker_data_price_inputs = ticker_data_price_inputs.view(-1, block_size, 1)
             ticker_data_targets = ticker_data_targets.view(-1, block_size, 1)
 
             print(f"ticker_data_price_inputs after reshape: {ticker_data_price_inputs.shape}")
             print(f"ticker_data_targets after reshape: {ticker_data_targets.shape}")
 
+            # append the price points and their targets of the current ticker to the overarching data structure
             price_inputs_list.append(ticker_data_price_inputs)
             targets_list.append(ticker_data_targets)
 
-
+        # stack the datqa from every ticker on top of each other so they become a batch dimension
         combined_price_inputs = torch.stack(price_inputs_list)
         combined_targets = torch.stack(targets_list)
 
+        # now the shape of the data will be: (number_of_tickers, block_size, 1)
         print(f"combined_price_inputs final shape: {combined_price_inputs.shape}")
         print(f"combined_targets final shape: {combined_targets.shape}")
+
+        print(f"combined_price_inputs \n: {combined_price_inputs}")
+        print(f"combined_targets \n: {combined_targets}")
 
         return combined_price_inputs, combined_targets
 
@@ -251,7 +258,7 @@ dataLoader = DataLoader(model_config)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-01-10')
+dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-01-15')
 
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
