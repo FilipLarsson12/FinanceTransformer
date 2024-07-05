@@ -127,32 +127,61 @@ class FinanceTransformer(nn.Module):
         return x
 
 
+
+# dataloader class
+class DataLoader():
+
+  def load_data_from_yfinance(filepath):
+
+    # Define the stock ticker and the time period
+    ticker = 'AAPL'
+    start_date = '2023-01-01'
+    end_date = '2024-01-01'
+
+    # Download the data
+    data = yf.download(ticker, start=start_date, end=end_date)
+
+    # Extract the closing prices
+    prices = data['Close'].values
+
+    # Open (or create if it doesn't exist) the file 'data.txt'
+    file_path = 'data.txt'
+    with open(file_path, 'w') as file:
+        # Write the ticker name as a header
+        file.write(f"Ticker: {ticker}\n")
+        
+        # Write each price point on a new line
+        for price in prices:
+            file.write(f"{price}\n")
+
+    print(f"Data written to {file_path}")
+
+
+  def load_data_from_file(filepath, block_size):
+    # Open the file for reading
+    with open(filepath, 'r') as file:
+        # Read all lines
+        lines = file.readlines()
+        
+        # Skip the first line (ticker name) and convert the remaining lines to floats
+        prices = [float(line.strip()) for line in lines[1:]]
+
+    # subtracting one because train_data and targets will both have length equal to len(prices) - 1  
+    pop_elements = (len(prices)-1) % block_size
+    print(f"popping {pop_elements} prices")
+
+    if pop_elements != 0:
+      prices = prices[:-pop_elements]
+    prices = torch.Tensor(prices)
+    return prices
+
+  def restructure_data(self, block_size, data):
+    data = data.view(-1, block_size, 1)
+    return data
+
 # ----------------------------------------------------------------------------------------
 
 # training run
-
-# create some data and reshape it so that it can be processed by the model
-data = torch.tensor([
-    [0.1, 0.7, 2.3, 1.1],
-    [0.4, 0.5, 1.8, 2.2],
-    [0.3, 1.2, 1.5, 0.8],
-    [4.1, 0.3, 2.7, 1.4],
-    [3.2, 1.8, 4.5, 3.3],
-    [2.9, 2.1, 3.3, 0.9],
-    [0.2, 3.0, 4.0, 1.0],
-    [1.0, 2.8, 0.9, 4.1],
-    [4.3, 4.5, 1.1, 3.7],
-    [1.5, 2.2, 0.4, 2.8]
-])
-
-data = data.view(data.shape[0], data.shape[1], 1)
-
-# creating two matrices that have data points corresponding with their targets at equal indices in the respective matrix
-train_data = data[:, :-1]
-targets = data[:, 1:]
-
-print(f"train data: {train_data}")
-print(f"targets: {targets}")
 
 
 # model config class
@@ -166,17 +195,35 @@ class ModelConfig():
 #init
 model_config = ModelConfig()
 
-
-print(f"data going into the transformer: {train_data}")
-print("Original input shape:", train_data.shape)
-
 model = FinanceTransformer(model_config)
+
+# load the data into our program
+
+dataloader = DataLoader()
+
+prices = DataLoader.load_data("data.txt", model_config.block_size)
+
+print(len(prices))
+
+print(f"prices shape {prices.shape}")
+
+price_inputs = prices[:-1]
+targets = prices[1:]
+print(len(price_inputs))
+
+price_inputs = dataloader.restructure_data(model_config.block_size, price_inputs)
+targets = dataloader.restructure_data(model_config.block_size, targets)
+
+print(f"data going into the transformer: {price_inputs}")
+print("Original input shape:", price_inputs.shape)
+
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# training run
+
+# training loop
 model.train()
 
 epochs = 10
@@ -184,7 +231,7 @@ epochs = 10
 for epoch in range(epochs):
 
   # get prediction
-  preds = model(train_data) 
+  preds = model(price_inputs) 
 
   # reset gradients
   optimizer.zero_grad()
