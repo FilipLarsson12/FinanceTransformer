@@ -133,19 +133,26 @@ class FinanceTransformer(nn.Module):
 
 # create some data and reshape it so that it can be processed by the model
 data = torch.tensor([
-    [0.1, 0.7, 2.3],
-    [0.4, 0.5, 1.8],
-    [0.3, 1.2, 1.5],
-    [4.1, 0.3, 2.7],
-    [3.2, 1.8, 4.5],
-    [2.9, 2.1, 3.3],
-    [0.2, 3.0, 4.0],
-    [1.0, 2.8, 0.9],
-    [4.3, 4.5, 1.1],
-    [1.5, 2.2, 0.4]
+    [0.1, 0.7, 2.3, 1.1],
+    [0.4, 0.5, 1.8, 2.2],
+    [0.3, 1.2, 1.5, 0.8],
+    [4.1, 0.3, 2.7, 1.4],
+    [3.2, 1.8, 4.5, 3.3],
+    [2.9, 2.1, 3.3, 0.9],
+    [0.2, 3.0, 4.0, 1.0],
+    [1.0, 2.8, 0.9, 4.1],
+    [4.3, 4.5, 1.1, 3.7],
+    [1.5, 2.2, 0.4, 2.8]
 ])
 
+data = data.view(data.shape[0], data.shape[1], 1)
 
+# creating two matrices that have data points corresponding with their targets at equal indices in the respective matrix
+train_data = data[:, :-1]
+targets = data[:, 1:]
+
+print(f"train data: {train_data}")
+print(f"targets: {targets}")
 
 
 # model config class
@@ -159,24 +166,49 @@ class ModelConfig():
 #init
 model_config = ModelConfig()
 
-data = data.view(data.shape[0], data.shape[1], 1)
 
-print(f"data going into the transformer: {data}")
-print("Original input shape:", data.shape)
+print(f"data going into the transformer: {train_data}")
+print("Original input shape:", train_data.shape)
 
 model = FinanceTransformer(model_config)
 
-pred = model(data) 
+# define loss function and optimizer
+loss_fn = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# prints
+# training run
+model.train()
 
-print("Pred shape after the model processed my data: ", pred.shape)
-print("Prediction from model: ", pred)
+epochs = 10
 
+for epoch in range(epochs):
 
-test = torch.tensor([[ 0.1732,  0.3001, 0.5],
-         [ 0.1069,  0.4810, 0.1],
-         [-0.0701,  0.9635, 1]])
-testlayer = nn.LayerNorm(3)
-res = testlayer(test)
-print("res: ", res)
+  # get prediction
+  preds = model(train_data) 
+
+  # reset gradients
+  optimizer.zero_grad()
+
+  # calculate loss
+  loss = loss_fn(preds, targets)
+
+  # calculate gradients from loss
+  loss.backward()
+
+  # update weights
+  optimizer.step()
+
+  print(f"epoch {epoch}, loss {loss}")
+
+  if (epoch == 0):
+    first_loss = loss
+  if (epoch == epochs-1):
+    last_loss = loss
+
+    loss_reduction = first_loss - last_loss
+    # prints
+    print("Pred shape after the model processed my data: ", preds.shape)
+    print("Prediction from model: ", preds)
+    print(f"acual targets {targets}")
+    print(f"first loss: {first_loss}, last loss: {last_loss}")
+    print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
