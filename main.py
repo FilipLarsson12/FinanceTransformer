@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 import torch.nn.functional as F
+import yfinance as yf
+import pandas as pd
+import numpy as np
 
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
@@ -17,17 +20,17 @@ class SelfAttentionLayer(nn.Module):
         # final proj before return
         self.proj = nn.Linear(config.embd_dim, config.embd_dim)
         # register parameter for the lower triangular mask-matrix
-        self.register_buffer("bias", 
+        self.register_buffer("bias",
         torch.tril(torch.ones(config.block_size, config.block_size))
         .view(1, config.block_size, config.block_size))
-        
+
 
     def forward(self, x):
         print("x that produces kqv: ", x)
         kqv = self.calc_kqv(x)
         print("kqv shape: ", kqv.shape)
         print("kqv: ", kqv)
-        # splitting so I have key, query and value 
+        # splitting so I have key, query and value
         k, q, v = kqv.split(self.config.embd_dim, dim=-1)
         print("k shape: ", k.shape)
         print("q shape: ", q.shape)
@@ -58,7 +61,7 @@ class SelfAttentionLayer(nn.Module):
         print("x: \n", x)
 
         return x
-    
+
 
 # class that defines a MLP
 class MLP(nn.Module):
@@ -68,13 +71,13 @@ class MLP(nn.Module):
         self.proj_1 = nn.Linear(config.embd_dim, 4 * config.embd_dim)
         self.gelu = nn.GELU(approximate='tanh')
         self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
-    
+
     def forward(self, x):
         x = self.proj_1(x)
         x = self.gelu(x)
         x = self.proj_2(x)
         return x
-    
+
 
 # class that defines a "block" in the model, it contains a layernorm to normalize activations, attention layer, MLP layer and another layernorm
 
@@ -108,7 +111,7 @@ class FinanceTransformer(nn.Module):
         self.layers = nn.ModuleList(
             [
                 Block(config) for _ in range(config.n_layers)
-            ]    
+            ]
         )
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
@@ -130,6 +133,10 @@ class FinanceTransformer(nn.Module):
 # dataloader class
 class DataLoader():
 
+  def __init__(self, config):
+    self.tickerList = []
+    self.config = config
+
   # Function to normalize the prices
   def normalize(self, prices):
       min_price = np.min(prices)
@@ -139,55 +146,86 @@ class DataLoader():
       normalized_prices = (prices - min_price) / (max_price - min_price)
       return normalized_prices
 
-  def load_data_from_yfinance(self, filepath, startDate, endDate):
+  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate):
+      with open(filepath, 'w') as file:
+          for ticker in tickerList:
+              data = yf.download(ticker, start=startDate, end=endDate)
+              prices = data['Close'].values
+              normalized_prices = self.normalize(prices)
 
-    # Define the stock ticker and the time period
-    ticker = 'AAPL'
-    start_date = startDate
-    end_date = endDate
+              # popping prices if they dont modulo with my model block_size
+              pop_elements = (len(normalized_prices)-1) % self.config.block_size
+              print(f"popping {pop_elements} prices")
+              if pop_elements != 0:
+                normalized_prices = normalized_prices[:-pop_elements]
 
-    # Download the data
-    data = yf.download(ticker, start=start_date, end=end_date)
-
-    # Extract the closing prices
-    prices = data['Close'].values
-
-    prices = self.normalize(prices)
-
-    # Open (or create if it doesn't exist) the file 'data.txt'
-    file_path = 'data.txt'
-    with open(file_path, 'w') as file:
-        # Write the ticker name as a header
-        file.write(f"Ticker: {ticker}\n")
-        
-        # Write each price point on a new line
-        for price in prices:
-            file.write(f"{price}\n")
-
-    print(f"Data written to {file_path}")
+              file.write(f"Ticker: {ticker}\n")
+              for price in normalized_prices:
+                  file.write(f"{price}\n")
+              file.write("\n")
+              self.tickerList.append(ticker)
 
 
-  def load_data_from_file(filepath, block_size):
+  def load_data_from_file(self, filepath, block_size):
+    data_dict = {}
+    current_ticker = None
+
     # Open the file for reading
     with open(filepath, 'r') as file:
         # Read all lines
         lines = file.readlines()
-        
-        # Skip the first line (ticker name) and convert the remaining lines to floats
-        prices = [float(line.strip()) for line in lines[1:]]
 
-    # subtracting one because train_data and targets will both have length equal to len(prices) - 1  
-    pop_elements = (len(prices)-1) % block_size
-    print(f"popping {pop_elements} prices")
+        for line in lines:
+          line = line.strip()
+          if not line:
+            continue
+          if line.startswith("Ticker:"):
+            current_ticker = line.split("Ticker: ")[1]
+            data_dict[current_ticker] = []
+          else:
+            data_dict[current_ticker].append(float(line))
 
-    if pop_elements != 0:
-      prices = prices[:-pop_elements]
+    return data_dict
+
+    # subtracting one because train_data and targets will both have length equal to len(prices) - 1
+
     prices = torch.Tensor(prices)
     return prices
 
-  def restructure_data(self, block_size, data):
-    data = data.view(-1, block_size, 1)
-    return data
+  def restructure_data(self, data_dict):
+        block_size = self.config.block_size
+        price_inputs_list = []
+        targets_list = []
+
+        for ticker, prices in data_dict.items():
+
+            # create inputs and targets that have equal indices in their corrsponding matrix
+            ticker_data_price_inputs = prices[:-1]
+            ticker_data_targets = prices[1:]
+
+            ticker_data_price_inputs = torch.Tensor(ticker_data_price_inputs)
+            ticker_data_targets = torch.Tensor(ticker_data_targets)
+
+            print(f"ticker_data_price_inputs before reshape: {ticker_data_price_inputs.shape}")
+            print(f"ticker_data_targets before reshape: {ticker_data_targets.shape}")
+
+            ticker_data_price_inputs.view(-1, block_size, 1)
+            ticker_data_targets.view(-1, block_size, 1)
+
+            print(f"ticker_data_price_inputs after reshape: {ticker_data_price_inputs.shape}")
+            print(f"ticker_data_targets after reshape: {ticker_data_targets.shape}")
+
+            price_inputs_list.append(ticker_data_price_inputs)
+            targets_list.append(ticker_data_targets)
+
+
+        combined_price_inputs = torch.stack(price_inputs_list)
+        combined_targets = torch.stack(targets_list)
+
+        print(f"combined_price_inputs final shape: {combined_price_inputs.shape}")
+        print(f"combined_targets final shape: {combined_targets.shape}")
+
+        return combined_price_inputs, combined_targets
 
 # ----------------------------------------------------------------------------------------
 
@@ -209,24 +247,24 @@ model = FinanceTransformer(model_config)
 
 # load the data into our program
 
-dataloader = DataLoader()
+dataLoader = DataLoader(model_config)
 
 data_file = "data.txt"
 
-dataloader.load_data_from_yfinance(data_file, startDate='2010-01-01', endDate='2024-01-01')
+dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-01-10')
 
-prices = DataLoader.load_data_from_file("data.txt", model_config.block_size)
 
-print(len(prices))
+data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
-print(f"prices shape {prices.shape}")
+print(data)
 
+'''
 price_inputs = prices[:-1]
 targets = prices[1:]
 print(len(price_inputs))
+'''
 
-price_inputs = dataloader.restructure_data(model_config.block_size, price_inputs)
-targets = dataloader.restructure_data(model_config.block_size, targets)
+price_inputs, targets = dataLoader.restructure_data(data)
 
 print(f"data going into the transformer: {price_inputs}")
 print("Original input shape:", price_inputs.shape)
@@ -245,7 +283,7 @@ epochs = 10
 for epoch in range(epochs):
 
   # get prediction
-  preds = model(price_inputs) 
+  preds = model(price_inputs)
 
   # reset gradients
   optimizer.zero_grad()
