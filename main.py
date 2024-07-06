@@ -32,9 +32,11 @@ class SelfAttentionLayer(nn.Module):
         print("kqv: ", kqv)
         # splitting so I have key, query and value
         k, q, v = kqv.split(self.config.embd_dim, dim=-1)
+        '''
         print("k shape: ", k.shape)
         print("q shape: ", q.shape)
         print("v shape: ", v.shape)
+        '''
         # calculating how much the embeddings "care" about one another
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
@@ -43,10 +45,14 @@ class SelfAttentionLayer(nn.Module):
         # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
 
+
+        '''
         print("Key: \n", k)
         print("Query: \n", q)
         print("Keyquery_matrix after mask: \n", keyquery_matrix)
         print("Keyquery_matrix shape: \n", keyquery_matrix.shape)
+        '''
+
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
         print("Keyquery_matrix after mask and softmax: \n", keyquery_matrix)
         print("Value: \n", v)
@@ -133,9 +139,17 @@ class FinanceTransformer(nn.Module):
 # dataloader class
 class DataLoader():
 
-  def __init__(self, config):
+  def __init__(self, config, batch_size):
     self.tickerList = []
     self.config = config
+    self.batch_size = batch_size
+    
+    # used to keep track of what batch to return when load_next_batch() is called
+    self.currentTickerIndex = 0
+    self.indexWithinTicker = 0
+    self.all_price_inputs = None
+    self.all_targets = None
+    self.batches_per_ticker = 0
 
   # Function to normalize the prices
   def normalize(self, prices):
@@ -187,10 +201,26 @@ class DataLoader():
 
     return data_dict
 
-    # subtracting one because train_data and targets will both have length equal to len(prices) - 1
 
-    prices = torch.Tensor(prices)
-    return prices
+  def load_next_batch(self):
+     
+    # go to next ticker if next batch exceeds remaining current ticker data
+    if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
+       self.currentTickerIndex += 1
+       self.indexWithinTicker = 0
+    
+    # placeholders
+    outerIdx = self.currentTickerIndex
+    innerIdx = self.indexWithinTicker
+
+    # pluck out next batch
+    inputs = self.all_price_inputs[outerIdx, innerIdx:innerIdx+self.batch_size]
+    targets = self.all_targets[outerIdx, innerIdx:innerIdx+self.batch_size]
+
+    # update index within current ticker
+    self.indexWithinTicker = self.indexWithinTicker + self.batch_size
+
+    return inputs, targets
 
   def restructure_data(self, data_dict):
         block_size = self.config.block_size
@@ -222,17 +252,19 @@ class DataLoader():
             targets_list.append(ticker_data_targets)
 
         # stack the datqa from every ticker on top of each other so they become a batch dimension
-        combined_price_inputs = torch.stack(price_inputs_list)
-        combined_targets = torch.stack(targets_list)
+        self.all_price_inputs = torch.stack(price_inputs_list)
+        self.all_targets = torch.stack(targets_list)
 
         # now the shape of the data will be: (number_of_tickers, block_size, 1)
-        print(f"combined_price_inputs final shape: {combined_price_inputs.shape}")
-        print(f"combined_targets final shape: {combined_targets.shape}")
+        print(f"combined_price_inputs final shape: {self.all_price_inputs.shape}")
+        print(f"combined_targets final shape: {self.all_targets.shape}")
 
-        print(f"combined_price_inputs \n: {combined_price_inputs}")
-        print(f"combined_targets \n: {combined_targets}")
+        print(f"combined_price_inputs \n: {self.all_price_inputs}")
+        print(f"combined_targets \n: {self.all_targets}")
 
-        return combined_price_inputs, combined_targets
+        self.batches_per_ticker = self.all_price_inputs.shape[1]
+
+        return self.all_price_inputs, self.all_targets
 
 # ----------------------------------------------------------------------------------------
 
@@ -245,7 +277,7 @@ class ModelConfig():
     input_dim = 1
     embd_dim = 6
     block_size = 3
-    n_layers = 1
+    n_layers = 0
 
 #init
 model_config = ModelConfig()
@@ -254,22 +286,14 @@ model = FinanceTransformer(model_config)
 
 # load the data into our program
 
-dataLoader = DataLoader(model_config)
+dataLoader = DataLoader(model_config, batch_size=12)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-01-15')
+dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-03-15')
 
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
-
-print(data)
-
-'''
-price_inputs = prices[:-1]
-targets = prices[1:]
-print(len(price_inputs))
-'''
 
 price_inputs, targets = dataLoader.restructure_data(data)
 
@@ -319,4 +343,8 @@ for epoch in range(epochs):
     print(f"first loss: {first_loss}, last loss: {last_loss}")
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
 
-print("hello")
+
+print(f"Data before restructure {data}")
+
+print(f"Data after restructure {price_inputs, targets}")
+print(f"Shape of Data after restructure {price_inputs.shape, targets.shape}")
