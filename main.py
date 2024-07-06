@@ -318,3 +318,5 @@ for epoch in range(epochs):
     print(f"acual targets {targets}")
     print(f"first loss: {first_loss}, last loss: {last_loss}")
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
+
+print("hello")
