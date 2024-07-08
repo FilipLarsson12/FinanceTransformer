@@ -340,7 +340,7 @@ while True:
   # get prediction
   preds, loss = model(X)
 
-  if loss is not None
+  if loss is not None:
     # reset gradients
     optimizer.zero_grad()
 
