@@ -150,6 +150,8 @@ class DataLoader():
     self.all_price_inputs = None
     self.all_targets = None
     self.batches_per_ticker = 0
+    # keep track of which epoch we are in
+    self.currentEpoch = 0
 
   # Function to normalize the prices
   def normalize(self, prices):
@@ -206,8 +208,11 @@ class DataLoader():
      
     # go to next ticker if next batch exceeds remaining current ticker data
     if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
-       self.currentTickerIndex += 1
-       self.indexWithinTicker = 0
+      if self.currentTickerIndex == len(self.tickerList-1):
+        self.currentTickerIndex = 0
+      else: 
+        self.currentTickerIndex += 1
+      self.indexWithinTicker = 0
     
     # placeholders
     outerIdx = self.currentTickerIndex
@@ -221,6 +226,25 @@ class DataLoader():
     self.indexWithinTicker = self.indexWithinTicker + self.batch_size
 
     return inputs, targets
+
+  # function to sanity check calculations in case I forget the code in the future
+  def confirm_inputs_targets_match(self, inputs, targets):
+    # in case we have multiple tickers
+    if inputs.dim() == 4:
+      inputs_reshaped = inputs.view(inputs.shape[0], -1)
+      targets_reshaped = targets.view(targets.shape[0], -1)
+      inputs_reshaped = inputs_reshaped[:, 1:]
+      targets_reshaped = targets_reshaped[:, :-1]
+      
+    # in case we only have one ticker
+    else:
+      inputs_reshaped = inputs_reshaped.view(-1)
+      targets_reshaped = targets_reshaped.view(-1)
+      inputs_reshaped = inputs_reshaped[:, 1:]
+      targets_reshaped = targets_reshaped[:, :-1]
+
+
+    return torch.equal(inputs_reshaped, targets_reshaped)
 
   def restructure_data(self, data_dict):
         block_size = self.config.block_size
