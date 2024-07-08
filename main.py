@@ -357,7 +357,7 @@ while True:
 
   
 
-  print(f"epoch {epoch}, loss {loss}")
+  print(f"epoch {epoch}, batch loss {loss}")
 
   if (dataLoader.currentBatch == 1):
     # this is first batch
@@ -375,3 +375,4 @@ while True:
     # stop training
     break
 
+print("hello")
