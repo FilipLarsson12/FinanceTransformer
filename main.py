@@ -26,45 +26,29 @@ class SelfAttentionLayer(nn.Module):
 
 
     def forward(self, x):
-        print("x that produces kqv: ", x)
+
         kqv = self.calc_kqv(x)
-        print("kqv shape: ", kqv.shape)
-        print("kqv: ", kqv)
+
         # splitting so I have key, query and value
         k, q, v = kqv.split(self.config.embd_dim, dim=-1)
-        '''
-        print("k shape: ", k.shape)
-        print("q shape: ", q.shape)
-        print("v shape: ", v.shape)
-        '''
+
         # calculating how much the embeddings "care" about one another
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-        print("Keyquery_matrix before mask: \n", keyquery_matrix)
         # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
 
 
-        '''
-        print("Key: \n", k)
-        print("Query: \n", q)
-        print("Keyquery_matrix after mask: \n", keyquery_matrix)
-        print("Keyquery_matrix shape: \n", keyquery_matrix.shape)
-        '''
+
 
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
-        print("Keyquery_matrix after mask and softmax: \n", keyquery_matrix)
-        print("Value: \n", v)
-        print("Value shape: ", v.shape)
 
         # calculate updated embd_values for the embeddings based on how much information should flow between them
         x = keyquery_matrix @ v # (batch_am, seq_len, seq_len) @ (batch_am, seq_len, embd_dim) = (batch_am, seq_len, embd_dim)
 
         # final proj
         x = self.proj(x)
-
-        print("x: \n", x)
 
         return x
 
@@ -98,7 +82,6 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = self.normlayer_1(x)
-        print("x after normlayer inside block: ", x)
         x = self.attentionlayer(x)
         x = self.normlayer_2(x)
         x = self.mlp(x)
@@ -125,12 +108,9 @@ class FinanceTransformer(nn.Module):
     def forward(self, x):
         # input dim is: (batch_am, seq_len, 1)
         x = self.embedding(x) # (batch_am, seq_len, embd_dim)
-        print("Embeddings from FT: ", x)
         for block in self.layers:
             x = block(x) # (batch_am, seq_len, embd_dim)
-        print("x after FT blocks: ", x)
         x = self.final_normlayer(x) # (batch_am, seq_len, embd_dim)
-        print("x before final proj: ", x)
         x = self.predictionlayer(x) # (batch_am, seq_len, 1)
         # now we have predictions at every position in the sequence in every batch
         return x
@@ -151,7 +131,8 @@ class DataLoader():
     self.all_targets = None
     self.batches_per_ticker = 0
     # keep track of which epoch we are in
-    self.currentEpoch = 0
+    self.currentEpoch = 1
+    self.currentBatch = 0
 
   # Function to normalize the prices
   def normalize(self, prices):
@@ -208,8 +189,11 @@ class DataLoader():
      
     # go to next ticker if next batch exceeds remaining current ticker data
     if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
-      if self.currentTickerIndex == len(self.tickerList-1):
+      # if we're at the last ticker go to first ticker and increment epoch
+      if self.currentTickerIndex == (len(self.tickerList) - 1):
         self.currentTickerIndex = 0
+        self.currentEpoch += 1
+
       else: 
         self.currentTickerIndex += 1
       self.indexWithinTicker = 0
@@ -224,6 +208,9 @@ class DataLoader():
 
     # update index within current ticker
     self.indexWithinTicker = self.indexWithinTicker + self.batch_size
+
+    # update batch tracker
+    self.currentBatch += 1
 
     return inputs, targets
 
@@ -245,6 +232,17 @@ class DataLoader():
 
 
     return torch.equal(inputs_reshaped, targets_reshaped)
+
+
+
+  # helper function to check if next batch is in this or next epoch
+  def check_for_next_epoch(self):
+
+      if (self.indexWithinTicker+self.batch_size > self.batches_per_ticker) and (self.currentTickerIndex == (len(self.tickerList) - 1)):
+        return True
+
+      return False
+
 
   def restructure_data(self, data_dict):
         block_size = self.config.block_size
@@ -283,9 +281,6 @@ class DataLoader():
         print(f"combined_price_inputs final shape: {self.all_price_inputs.shape}")
         print(f"combined_targets final shape: {self.all_targets.shape}")
 
-        print(f"combined_price_inputs \n: {self.all_price_inputs}")
-        print(f"combined_targets \n: {self.all_targets}")
-
         self.batches_per_ticker = self.all_price_inputs.shape[1]
 
         return self.all_price_inputs, self.all_targets
@@ -301,7 +296,7 @@ class ModelConfig():
     input_dim = 1
     embd_dim = 6
     block_size = 3
-    n_layers = 0
+    n_layers = 1
 
 #init
 model_config = ModelConfig()
@@ -310,20 +305,15 @@ model = FinanceTransformer(model_config)
 
 # load the data into our program
 
-dataLoader = DataLoader(model_config, batch_size=12)
+dataLoader = DataLoader(model_config, batch_size=4)
 
 data_file = "data.txt"
 
 dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-03-15')
 
-
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
 price_inputs, targets = dataLoader.restructure_data(data)
-
-print(f"data going into the transformer: {price_inputs}")
-print("Original input shape:", price_inputs.shape)
-
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
@@ -333,18 +323,24 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 # training loop
 model.train()
 
-epochs = 10
+epochs = 4
 
-for epoch in range(epochs):
+while (dataLoader.currentEpoch < (epochs+1)):
 
+  # placeholder
+  epoch = dataLoader.currentEpoch
+
+  # load batch
+  X, Y = dataLoader.load_next_batch()
+  
   # get prediction
-  preds = model(price_inputs)
+  preds = model(X)
 
   # reset gradients
   optimizer.zero_grad()
 
   # calculate loss
-  loss = loss_fn(preds, targets)
+  loss = loss_fn(preds, Y)
 
   # calculate gradients from loss
   loss.backward()
@@ -354,21 +350,15 @@ for epoch in range(epochs):
 
   print(f"epoch {epoch}, loss {loss}")
 
-  if (epoch == 0):
+  if (dataLoader.currentBatch == 1):
     first_loss = loss
-  if (epoch == epochs-1):
+  if (epoch == epochs and dataLoader.check_for_next_epoch()):
     last_loss = loss
-
     loss_reduction = first_loss - last_loss
+
+
     # prints
     print("Pred shape after the model processed my data: ", preds.shape)
-    print("Prediction from model: ", preds)
-    print(f"acual targets {targets}")
     print(f"first loss: {first_loss}, last loss: {last_loss}")
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
 
-
-print(f"Data before restructure {data}")
-
-print(f"Data after restructure {price_inputs, targets}")
-print(f"Shape of Data after restructure {price_inputs.shape, targets.shape}")
