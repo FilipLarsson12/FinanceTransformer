@@ -39,9 +39,6 @@ class SelfAttentionLayer(nn.Module):
         # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
 
-
-
-
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
 
         # calculate updated embd_values for the embeddings based on how much information should flow between them
@@ -105,15 +102,22 @@ class FinanceTransformer(nn.Module):
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, targets=None):
         # input dim is: (batch_am, seq_len, 1)
         x = self.embedding(x) # (batch_am, seq_len, embd_dim)
         for block in self.layers:
             x = block(x) # (batch_am, seq_len, embd_dim)
         x = self.final_normlayer(x) # (batch_am, seq_len, embd_dim)
-        x = self.predictionlayer(x) # (batch_am, seq_len, 1)
-        # now we have predictions at every position in the sequence in every batch
-        return x
+
+        if targets is not None:
+          # now we get predictions at every position in the sequence in every batch
+          logits = self.predictionlayer(x) # (batch_am, seq_len, 1)
+          loss = nn.MSELoss(preds, Y)
+        else:
+          logits = self.predictionlayer(x) # (batch_am, seq_len, 1)
+          loss = None
+        
+        return logits, loss
 
 
 # dataloader class
@@ -294,9 +298,9 @@ class DataLoader():
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 6
-    block_size = 3
-    n_layers = 1
+    embd_dim = 5
+    block_size = 100
+    n_layers = 2
 
 #init
 model_config = ModelConfig()
@@ -309,7 +313,7 @@ dataLoader = DataLoader(model_config, batch_size=4)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['AAPL', 'MSFT'], data_file, startDate='2024-01-01', endDate='2024-03-15')
+dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2024-01-01')
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
@@ -323,9 +327,9 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 # training loop
 model.train()
 
-epochs = 4
+epochs = 1
 
-while (dataLoader.currentEpoch < (epochs+1)):
+while True:
 
   # placeholder
   epoch = dataLoader.currentEpoch
@@ -334,31 +338,40 @@ while (dataLoader.currentEpoch < (epochs+1)):
   X, Y = dataLoader.load_next_batch()
   
   # get prediction
-  preds = model(X)
+  preds, loss = model(X)
 
-  # reset gradients
-  optimizer.zero_grad()
+  if loss is not None
+    # reset gradients
+    optimizer.zero_grad()
 
-  # calculate loss
-  loss = loss_fn(preds, Y)
+    # calculate gradients from loss
+    loss.backward()
 
-  # calculate gradients from loss
-  loss.backward()
+    # update weights
+    optimizer.step()
+  else:
 
-  # update weights
-  optimizer.step()
+    # get last prediction from model
+    pred = preds[:, -1, -1, -1]
+    print(f"Prediction from model: {pred}")
+
+  
 
   print(f"epoch {epoch}, loss {loss}")
 
   if (dataLoader.currentBatch == 1):
+    # this is first batch
     first_loss = loss
+
   if (epoch == epochs and dataLoader.check_for_next_epoch()):
+    # this is the last batch
     last_loss = loss
     loss_reduction = first_loss - last_loss
-
 
     # prints
     print("Pred shape after the model processed my data: ", preds.shape)
     print(f"first loss: {first_loss}, last loss: {last_loss}")
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
+    # stop training
+    break
 
