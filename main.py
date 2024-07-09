@@ -22,10 +22,12 @@ class SelfAttentionLayer(nn.Module):
         # register parameter for the lower triangular mask-matrix
         self.register_buffer("bias",
         torch.tril(torch.ones(config.block_size, config.block_size))
-        .view(1, config.block_size, config.block_size))
+        .view(1, 1, config.block_size, config.block_size))
 
 
     def forward(self, x):
+
+        B, T, C = x.size() # batch size, sequence length, embd_dim           
 
         kqv = self.calc_kqv(x)
 
@@ -36,10 +38,14 @@ class SelfAttentionLayer(nn.Module):
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+        print(f"keyquery matrix shape {keyquery_matrix.shape}")
         # make it impossible for embeddings to get information from embeddings that comes after
-        keyquery_matrix = keyquery_matrix.masked_fill(self.bias == 0, float('-inf'))
+        print(f"bias: {self.bias[:, :, :T, :T]}")
+        keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        print(f"keyquery matrix after applying bias {keyquery_matrix}")
 
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
+        print(f"keyquery matrix after applying bias + softmax {keyquery_matrix}")
 
         # calculate updated embd_values for the embeddings based on how much information should flow between them
         x = keyquery_matrix @ v # (batch_am, seq_len, seq_len) @ (batch_am, seq_len, embd_dim) = (batch_am, seq_len, embd_dim)
@@ -103,22 +109,43 @@ class FinanceTransformer(nn.Module):
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
     def forward(self, x, targets=None):
-        # input dim is: (batch_am, seq_len, 1)
-        x = self.embedding(x) # (batch_am, seq_len, embd_dim)
+
+        
+        _, T, _ = x.size()
+
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+
+        # input dim is: (batch_am, block_size, 1)
+        x = self.embedding(x) # (batch_am, block_size, embd_dim)
         for block in self.layers:
-            x = block(x) # (batch_am, seq_len, embd_dim)
-        x = self.final_normlayer(x) # (batch_am, seq_len, embd_dim)
+            x = block(x) # (batch_am, block_size, embd_dim)
+        x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
 
         if targets is not None:
           # now we get predictions at every position in the sequence in every batch
-          logits = self.predictionlayer(x) # (batch_am, seq_len, 1)
-          loss = nn.MSELoss(preds, Y)
+          preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+          loss_fn = nn.MSELoss()
+          loss = loss_fn(preds, targets)
         else:
-          logits = self.predictionlayer(x) # (batch_am, seq_len, 1)
+          preds = self.predictionlayer(x) # (batch_am, block_size, 1)
           loss = None
         
-        return logits, loss
+        return preds, loss
 
+    # to generate from the model
+    def generate(self, context, max_new_prices):
+      
+
+
+      pred = self(context)
+      if pred.dim() == 4:
+        pred = pred[:, -1, -1, -1]
+      elif pred.dim() == 3:
+        pred = pred[-1, -1, -1]
+
+      return pred
+
+      
 
 # dataloader class
 class DataLoader():
@@ -299,8 +326,8 @@ class DataLoader():
 class ModelConfig():
     input_dim = 1
     embd_dim = 5
-    block_size = 100
-    n_layers = 2
+    block_size = 3
+    n_layers = 1
 
 #init
 model_config = ModelConfig()
@@ -338,7 +365,7 @@ while True:
   X, Y = dataLoader.load_next_batch()
   
   # get prediction
-  preds, loss = model(X)
+  preds, loss = model(X, Y)
 
   if loss is not None:
     # reset gradients
@@ -355,9 +382,9 @@ while True:
     pred = preds[:, -1, -1, -1]
     print(f"Prediction from model: {pred}")
 
-  
 
-  print(f"epoch {epoch}, batch loss {loss}")
+
+  print(f"epoch {epoch}, loss {loss}")
 
   if (dataLoader.currentBatch == 1):
     # this is first batch
@@ -375,5 +402,13 @@ while True:
     # stop training
     break
 
-print("hello")
-print("there")
+# ensure test has dimensions: ticker_am, batch_am, <= block_size, 1
+test = torch.Tensor(
+    [
+        [[0.5], [0.6], [0.7]]
+     ]
+    )
+print(f"test dim : \n{test.shape}")
+pred = model(test)
+print(f"input: {test}, pred \n{pred}")
+
