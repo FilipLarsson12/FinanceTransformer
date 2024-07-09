@@ -387,7 +387,7 @@ class DataLoader():
 class ModelConfig():
     input_dim = 1
     embd_dim = 5
-    block_size = 12
+    block_size = 5
     n_layers = 1
 
 
@@ -402,7 +402,7 @@ dataLoader = DataLoader(model_config, batch_size=1)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-04-01')
+dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-02-15')
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
@@ -410,13 +410,13 @@ price_inputs, targets = dataLoader.restructure_data()
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 
 # training loop
 model.train()
 
-epochs = 10
+epochs = 1
 
 while True:
 
@@ -442,7 +442,6 @@ while True:
 
     # get last prediction from model
     pred = preds[:, -1, -1, -1]
-    print(f"Prediction from model: {pred}")
 
 
 
