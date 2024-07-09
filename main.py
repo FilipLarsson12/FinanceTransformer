@@ -22,7 +22,7 @@ class SelfAttentionLayer(nn.Module):
         # register parameter for the lower triangular mask-matrix
         self.register_buffer("bias",
         torch.tril(torch.ones(config.block_size, config.block_size))
-        .view(1, 1, config.block_size, config.block_size))
+        .view(1, config.block_size, config.block_size))
 
 
     def forward(self, x):
@@ -40,8 +40,8 @@ class SelfAttentionLayer(nn.Module):
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
         print(f"keyquery matrix shape {keyquery_matrix.shape}")
         # make it impossible for embeddings to get information from embeddings that comes after
-        print(f"bias: {self.bias[:, :, :T, :T]}")
-        keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        print(f"bias: {self.bias[:, :T, :T]}")
+        keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :T, :T] == 0, float('-inf'))
         print(f"keyquery matrix after applying bias {keyquery_matrix}")
 
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
@@ -119,6 +119,7 @@ class FinanceTransformer(nn.Module):
         x = self.embedding(x) # (batch_am, block_size, embd_dim)
         for block in self.layers:
             x = block(x) # (batch_am, block_size, embd_dim)
+        print("data shape after attention: ", x.shape)
         x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
 
         if targets is not None:
@@ -132,18 +133,21 @@ class FinanceTransformer(nn.Module):
         
         return preds, loss
 
-    # to generate from the model
-    def generate(self, context, max_new_prices):
+    # to generate next price point from the model or to generate multiple price points for plotting for example
+    def generate(self, context, multiple=None):
       
+      if multiple:
+        print("generate multiple")
+        preds, _ = self(context)
+        print(f"preds shape {preds.shape}")
+        preds = preds[:, -1, -1]
+        return preds
 
+      else:
 
-      pred = self(context)
-      if pred.dim() == 4:
-        pred = pred[:, -1, -1, -1]
-      elif pred.dim() == 3:
+        pred, _ = self(context)
         pred = pred[-1, -1, -1]
-
-      return pred
+        return pred
 
       
 
@@ -402,13 +406,15 @@ while True:
     # stop training
     break
 
-# ensure test has dimensions: ticker_am, batch_am, <= block_size, 1
+# ensure test has dimensions: (batch_am, <= block_size, 1)
 test = torch.Tensor(
     [
+        [[0.5], [0.6], [0.7]],
         [[0.5], [0.6], [0.7]]
+
      ]
     )
 print(f"test dim : \n{test.shape}")
-pred = model(test)
-print(f"input: {test}, pred \n{pred}")
+pred = model.generate(test, multiple=True)
+print(f"input: {test}, pred \n{pred.shape}")
 
