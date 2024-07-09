@@ -151,9 +151,10 @@ class FinanceTransformer(nn.Module):
         return pred
 
 
+# class for visualization
 class Visualizer():
 
-    def plot(self, actual_prices, preds, width=10, downsample_factor=1):
+    def plot(self, ticker, actual_prices, preds, width=10, downsample_factor=1):
         actual_prices = np.array(actual_prices)
         preds = np.array(preds)
 
@@ -169,7 +170,7 @@ class Visualizer():
         plt.plot(actual_prices, color='blue', linestyle='-', linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
         plt.plot(preds, color='red', linestyle='-', linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
-        plt.title('Stock Price Plot')
+        plt.title(f'{ticker} Price Plot')
         plt.xlabel('Time')
         plt.ylabel('Price')
         plt.grid(True)
@@ -389,6 +390,7 @@ class ModelConfig():
     block_size = 3
     n_layers = 1
 
+
 #init
 model_config = ModelConfig()
 
@@ -400,15 +402,15 @@ dataLoader = DataLoader(model_config, batch_size=4)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2024-01-01')
+dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2020-01-01')
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
-price_inputs, targets = dataLoader.restructure_data(data)
+price_inputs, targets = dataLoader.restructure_data()
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
 
 # training loop
@@ -476,10 +478,27 @@ print(f"input: {test}, pred \n{pred}")
 
 vliser = Visualizer()
 prices = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
-preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
+plot_preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
 
 print(f"dataloader data_dict: {dataLoader.data_dict}")
-dataLoader.load_data_for_plot_inference('TLSA', 99)
 
-vliser.plot(prices, preds, width=16)
+
+# let's visualize how our model performs
+with torch.no_grad():
+
+  reshaped_data_for_model, real_prices = dataLoader.load_data_for_plot_inference('TLSA', 270)
+  preds = model.generate(reshaped_data_for_model, multiple=True)
+
+# remove first {block_size} price points before plotting because those are only used for first context
+real_prices = real_prices[3:]
+print(f"original_data shape {real_prices.shape}")
+
+# remove last pred because we cant compare that in a plot to an existing price point
+preds = preds[:-1]
+print(f"preds shape {preds.shape}")
+
+print(f"real prices {real_prices}")
+print(f"preds {preds}")
+
+vliser.plot('TLSA', real_prices, preds, width=16)
 
