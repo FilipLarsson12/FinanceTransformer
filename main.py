@@ -451,3 +451,5 @@ prices = np.random.rand(500) * 100  # Scaling to make it look more like stock pr
 preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
 
 vliser.plot(prices, preds, width=16)
+
+print("hello")
