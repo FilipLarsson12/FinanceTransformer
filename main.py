@@ -276,6 +276,34 @@ class DataLoader():
     self.currentBatch += 1
 
     return inputs, targets
+  
+  # function to load data for plotting model's predictions, this data will overlap which the load_next_batch() can't do
+  def load_data_for_plot_inference(self, ticker, amount):
+    # this function will return data prepared for model in the shape: (batch_am, block_size, 1)
+    # and data in the shape (amount) that will be plotted against model output to evaluate performance
+    block_size = self.config.block_size
+
+    assert amount % block_size == 0, f"number of data points must be divisible by block_size of {block_size}"
+
+    data = self.data_dict[ticker][:amount]
+    original_tensor = torch.tensor(data)
+
+    num_contexts = len(original_tensor) - block_size + 1
+
+    # Initialize the result tensor
+    result = []
+
+    # Create the windows
+    for i in range(num_contexts):
+        context = original_tensor[i:i+block_size].unsqueeze(1)
+        result.append(context)
+
+    # Stack the windows to create the final tensor
+    result_tensor = torch.stack(result)
+    print(f"result tensor shape {result_tensor.shape}")
+    print(f"result tensor \n{result_tensor} \n original tensor \n{original_tensor}")
+
+    return result_tensor, original_tensor
 
   # function to sanity check calculations in case I forget the code in the future
   def confirm_inputs_targets_match(self, inputs, targets):
@@ -452,4 +480,5 @@ preds = np.random.rand(500) * 100  # Scaling to make it look more like stock pri
 
 vliser.plot(prices, preds, width=16)
 
-print("hello")
+print(f"dataloader data_dict: {dataLoader.data_dict}")
+dataLoader.load_data_for_plot_inference('TLSA', 99)
