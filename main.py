@@ -167,8 +167,8 @@ class Visualizer():
         plt.figure(figsize=(width, 6))
 
         # Plot the points with labels
-        plt.plot(actual_prices, color='blue', linestyle='-', linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
-        plt.plot(preds, color='red', linestyle='-', linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
+        plt.plot(actual_prices, color='blue', linestyle='-', marker='o', markersize=2, linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
+        plt.plot(preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=1, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
         plt.title(f'{ticker} Price Plot')
         plt.xlabel('Time')
@@ -387,7 +387,7 @@ class DataLoader():
 class ModelConfig():
     input_dim = 1
     embd_dim = 5
-    block_size = 3
+    block_size = 12
     n_layers = 1
 
 
@@ -398,11 +398,11 @@ model = FinanceTransformer(model_config)
 
 # load the data into our program
 
-dataLoader = DataLoader(model_config, batch_size=4)
+dataLoader = DataLoader(model_config, batch_size=1)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2020-01-01')
+dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-04-01')
 
 data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
@@ -410,13 +410,13 @@ price_inputs, targets = dataLoader.restructure_data()
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
 
 
 # training loop
 model.train()
 
-epochs = 1
+epochs = 10
 
 while True:
 
@@ -464,33 +464,20 @@ while True:
     # stop training
     break
 
-# ensure test has dimensions: (batch_am, <= block_size, 1)
-test = torch.Tensor(
-    [
-        [[0.5], [0.6], [0.7]],
-        [[0.5], [0.6], [0.7]]
-
-     ]
-    )
-print(f"test dim : \n{test.shape}")
-pred = model.generate(test, multiple=True)
-print(f"input: {test}, pred \n{pred}")
-
-vliser = Visualizer()
-prices = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
-plot_preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
 
 print(f"dataloader data_dict: {dataLoader.data_dict}")
 
 
 # let's visualize how our model performs
+vliser = Visualizer()
+
 with torch.no_grad():
 
-  reshaped_data_for_model, real_prices = dataLoader.load_data_for_plot_inference('TLSA', 270)
+  reshaped_data_for_model, real_prices = dataLoader.load_data_for_plot_inference('MSFT', model_config.block_size*5)
   preds = model.generate(reshaped_data_for_model, multiple=True)
 
 # remove first {block_size} price points before plotting because those are only used for first context
-real_prices = real_prices[3:]
+real_prices = real_prices[model_config.block_size:]
 print(f"original_data shape {real_prices.shape}")
 
 # remove last pred because we cant compare that in a plot to an existing price point
