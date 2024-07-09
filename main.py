@@ -186,7 +186,8 @@ class DataLoader():
     self.tickerList = []
     self.config = config
     self.batch_size = batch_size
-    
+    self.data_dict = {}
+
     # used to keep track of what batch to return when load_next_batch() is called
     self.currentTickerIndex = 0
     self.indexWithinTicker = 0
@@ -227,7 +228,6 @@ class DataLoader():
 
 
   def load_data_from_file(self, filepath, block_size):
-    data_dict = {}
     current_ticker = None
 
     # Open the file for reading
@@ -241,15 +241,13 @@ class DataLoader():
             continue
           if line.startswith("Ticker:"):
             current_ticker = line.split("Ticker: ")[1]
-            data_dict[current_ticker] = []
+            self.data_dict[current_ticker] = []
           else:
-            data_dict[current_ticker].append(float(line))
-
-    return data_dict
+           self.data_dict[current_ticker].append(float(line))
 
 
   def load_next_batch(self):
-     
+
     # go to next ticker if next batch exceeds remaining current ticker data
     if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
       # if we're at the last ticker go to first ticker and increment epoch
@@ -257,10 +255,10 @@ class DataLoader():
         self.currentTickerIndex = 0
         self.currentEpoch += 1
 
-      else: 
+      else:
         self.currentTickerIndex += 1
       self.indexWithinTicker = 0
-    
+
     # placeholders
     outerIdx = self.currentTickerIndex
     innerIdx = self.indexWithinTicker
@@ -276,7 +274,7 @@ class DataLoader():
     self.currentBatch += 1
 
     return inputs, targets
-  
+
   # function to load data for plotting model's predictions, this data will overlap which the load_next_batch() can't do
   def load_data_for_plot_inference(self, ticker, amount):
     # this function will return data prepared for model in the shape: (batch_am, block_size, 1)
@@ -305,6 +303,8 @@ class DataLoader():
 
     return result_tensor, original_tensor
 
+
+
   # function to sanity check calculations in case I forget the code in the future
   def confirm_inputs_targets_match(self, inputs, targets):
     # in case we have multiple tickers
@@ -313,7 +313,7 @@ class DataLoader():
       targets_reshaped = targets.view(targets.shape[0], -1)
       inputs_reshaped = inputs_reshaped[:, 1:]
       targets_reshaped = targets_reshaped[:, :-1]
-      
+
     # in case we only have one ticker
     else:
       inputs_reshaped = inputs_reshaped.view(-1)
@@ -335,12 +335,12 @@ class DataLoader():
       return False
 
 
-  def restructure_data(self, data_dict):
+  def restructure_data(self):
         block_size = self.config.block_size
         price_inputs_list = []
         targets_list = []
 
-        for ticker, prices in data_dict.items():
+        for ticker, prices in self.data_dict.items():
 
             # create inputs and targets that have equal indices in their corresponding matrix
             ticker_data_price_inputs = prices[:-1]
@@ -478,7 +478,8 @@ vliser = Visualizer()
 prices = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
 preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
 
-vliser.plot(prices, preds, width=16)
-
 print(f"dataloader data_dict: {dataLoader.data_dict}")
 dataLoader.load_data_for_plot_inference('TLSA', 99)
+
+vliser.plot(prices, preds, width=16)
+
