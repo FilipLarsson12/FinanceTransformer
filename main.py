@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
@@ -149,7 +150,34 @@ class FinanceTransformer(nn.Module):
         pred = pred[-1, -1, -1]
         return pred
 
-      
+
+class Visualizer():
+
+    def plot(self, actual_prices, preds, width=10, downsample_factor=1):
+        actual_prices = np.array(actual_prices)
+        preds = np.array(preds)
+
+        # Downsample the data if downsample_factor > 1
+        if downsample_factor > 1:
+            actual_prices = actual_prices[::downsample_factor]
+            preds = preds[::downsample_factor]
+
+        # Create a figure with the specified width and a default height
+        plt.figure(figsize=(width, 6))
+
+        # Plot the points with labels
+        plt.plot(actual_prices, color='blue', linestyle='-', linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
+        plt.plot(preds, color='red', linestyle='-', linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
+
+        plt.title('Stock Price Plot')
+        plt.xlabel('Time')
+        plt.ylabel('Price')
+        plt.grid(True)
+        plt.legend()  # Add a legend to the plot
+        plt.show()
+
+
+
 
 # dataloader class
 class DataLoader():
@@ -416,5 +444,10 @@ test = torch.Tensor(
     )
 print(f"test dim : \n{test.shape}")
 pred = model.generate(test, multiple=True)
-print(f"input: {test}, pred \n{pred.shape}")
+print(f"input: {test}, pred \n{pred}")
 
+vliser = Visualizer()
+prices = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
+preds = np.random.rand(500) * 100  # Scaling to make it look more like stock prices
+
+vliser.plot(prices, preds, width=16)
