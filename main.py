@@ -9,6 +9,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # class that defines the self attention layers
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+# class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
 
     def __init__(self, config):
@@ -25,34 +31,43 @@ class SelfAttentionLayer(nn.Module):
         torch.tril(torch.ones(config.block_size, config.block_size))
         .view(1, config.block_size, config.block_size))
 
-
     def forward(self, x):
+        print(f"Input to SelfAttentionLayer: {x}")
 
-        B, T, C = x.size() # batch size, sequence length, embd_dim           
+        B, T, C = x.size() # batch size, sequence length, embd_dim
+        print(f"B: {B}, T: {T}, C: {C}")
 
         kqv = self.calc_kqv(x)
+        print(f"kqv: {kqv}")
 
         # splitting so I have key, query and value
         k, q, v = kqv.split(self.config.embd_dim, dim=-1)
+        print(f"k: {k}")
+        print(f"q: {q}")
+        print(f"v: {v}")
 
         # calculating how much the embeddings "care" about one another
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-        print(f"keyquery matrix shape {keyquery_matrix.shape}")
+        print(f"keyquery matrix shape: {keyquery_matrix.shape}")
+        print(f"keyquery matrix before applying bias: {keyquery_matrix}")
+
         # make it impossible for embeddings to get information from embeddings that comes after
         print(f"bias: {self.bias[:, :T, :T]}")
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :T, :T] == 0, float('-inf'))
-        print(f"keyquery matrix after applying bias {keyquery_matrix}")
+        print(f"keyquery matrix after applying bias: {keyquery_matrix}")
 
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
-        print(f"keyquery matrix after applying bias + softmax {keyquery_matrix}")
+        print(f"keyquery matrix after applying bias + softmax: {keyquery_matrix}")
 
         # calculate updated embd_values for the embeddings based on how much information should flow between them
         x = keyquery_matrix @ v # (batch_am, seq_len, seq_len) @ (batch_am, seq_len, embd_dim) = (batch_am, seq_len, embd_dim)
+        print(f"Updated x after attention: {x}")
 
         # final proj
         x = self.proj(x)
+        print(f"Output of SelfAttentionLayer after proj: {x}")
 
         return x
 
@@ -67,9 +82,13 @@ class MLP(nn.Module):
         self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
 
     def forward(self, x):
+        print(f"Input to MLP: {x}")
         x = self.proj_1(x)
+        print(f"After proj_1: {x}")
         x = self.gelu(x)
+        print(f"After GELU: {x}")
         x = self.proj_2(x)
+        print(f"Output of MLP: {x}")
         return x
 
 
@@ -85,10 +104,15 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
+        print(f"Input to Block: {x}")
         x = self.normlayer_1(x)
+        print(f"After normlayer_1: {x}")
         x = self.attentionlayer(x)
+        print(f"After attentionlayer: {x}")
         x = self.normlayer_2(x)
+        print(f"After normlayer_2: {x}")
         x = self.mlp(x)
+        print(f"Output of Block: {x}")
         return x
 
 
@@ -110,51 +134,62 @@ class FinanceTransformer(nn.Module):
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
     def forward(self, x, targets=None):
+        print(f"Input to FinanceTransformer: {x}")
 
-        
         _, T, _ = x.size()
+        print(f"Sequence length T: {T}")
 
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
 
         # input dim is: (batch_am, block_size, 1)
         x = self.embedding(x) # (batch_am, block_size, embd_dim)
-        for block in self.layers:
+        print(f"After embedding: {x}")
+        for i, block in enumerate(self.layers):
+            print(f"Passing through block {i}")
             x = block(x) # (batch_am, block_size, embd_dim)
-        print("data shape after attention: ", x.shape)
+        print("Data shape after attention: ", x.shape)
         x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
+        print(f"After final_normlayer: {x}")
 
         if targets is not None:
-          # now we get predictions at every position in the sequence in every batch
-          preds = self.predictionlayer(x) # (batch_am, block_size, 1)
-          loss_fn = nn.MSELoss()
-          loss = loss_fn(preds, targets)
+            # now we get predictions at every position in the sequence in every batch
+            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            print(f"Predictions: {preds}")
+            loss_fn = nn.MSELoss()
+            loss = loss_fn(preds, targets)
+            print(f"Loss: {loss}")
         else:
-          preds = self.predictionlayer(x) # (batch_am, block_size, 1)
-          loss = None
+            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            print(f"Predictions: {preds}")
+            loss = None
         
         return preds, loss
 
     # to generate next price point from the model or to generate multiple price points for plotting for example
     def generate(self, context, multiple=None):
-      
-      if multiple:
-        print("generate multiple")
-        preds, _ = self(context)
-        print(f"preds shape {preds.shape}")
-        preds = preds[:, -1, -1]
-        return preds
+        print(f"Input to generate: {context}")
 
-      else:
+        if multiple:
+            print("Generate multiple")
+            preds, _ = self(context)
+            print(f"Preds shape: {preds.shape}")
+            preds = preds[:, -1, -1]
+            print(f"Output preds: {preds}")
+            return preds
 
-        pred, _ = self(context)
-        pred = pred[-1, -1, -1]
-        return pred
+        else:
+            pred, _ = self(context)
+            print(f"Single pred before reshape: {pred}")
+            pred = pred[-1, -1, -1]
+            print(f"Output pred: {pred}")
+            return pred
 
 
-# class for visualization
+
+
 class Visualizer():
 
-    def plot(self, ticker, actual_prices, preds, width=10, downsample_factor=1):
+    def plot(self, actual_prices, preds, width=10, downsample_factor=1):
         actual_prices = np.array(actual_prices)
         preds = np.array(preds)
 
@@ -168,9 +203,9 @@ class Visualizer():
 
         # Plot the points with labels
         plt.plot(actual_prices, color='blue', linestyle='-', marker='o', markersize=2, linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
-        plt.plot(preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=1, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
+        plt.plot(preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
-        plt.title(f'{ticker} Price Plot')
+        plt.title('Stock Price Plot')
         plt.xlabel('Time')
         plt.ylabel('Price')
         plt.grid(True)
@@ -188,7 +223,7 @@ class DataLoader():
     self.config = config
     self.batch_size = batch_size
     self.data_dict = {}
-
+    
     # used to keep track of what batch to return when load_next_batch() is called
     self.currentTickerIndex = 0
     self.indexWithinTicker = 0
@@ -248,7 +283,7 @@ class DataLoader():
 
 
   def load_next_batch(self):
-
+     
     # go to next ticker if next batch exceeds remaining current ticker data
     if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
       # if we're at the last ticker go to first ticker and increment epoch
@@ -256,10 +291,10 @@ class DataLoader():
         self.currentTickerIndex = 0
         self.currentEpoch += 1
 
-      else:
+      else: 
         self.currentTickerIndex += 1
       self.indexWithinTicker = 0
-
+    
     # placeholders
     outerIdx = self.currentTickerIndex
     innerIdx = self.indexWithinTicker
@@ -314,7 +349,7 @@ class DataLoader():
       targets_reshaped = targets.view(targets.shape[0], -1)
       inputs_reshaped = inputs_reshaped[:, 1:]
       targets_reshaped = targets_reshaped[:, :-1]
-
+      
     # in case we only have one ticker
     else:
       inputs_reshaped = inputs_reshaped.view(-1)
@@ -379,44 +414,101 @@ class DataLoader():
 
 # ----------------------------------------------------------------------------------------
 
-# training run
-
 
 # model config class
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 5
-    block_size = 5
+    embd_dim = 4
+    block_size = 3
     n_layers = 1
-
 
 #init
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 
-# load the data into our program
-
-dataLoader = DataLoader(model_config, batch_size=1)
-
-data_file = "data.txt"
-
-dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-02-15')
-
-data = dataLoader.load_data_from_file("data.txt", model_config.block_size)
-
-price_inputs, targets = dataLoader.restructure_data()
+# training loop
+model.train()
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
+vliser = Visualizer()
 
-# training loop
-model.train()
+# alt training run
 
-epochs = 1
+lossi = []
+
+for i in range(200):
+  X = torch.Tensor([[[0.2], [0.5], [0.8]],
+                    [[0.2], [0.5], [0.8]],
+                    ])
+  Y = torch.Tensor([[[0.5], [0.8], [1.0]],
+                    [[0.2], [0.5], [0.8]]
+                    ])
+
+  # get prediction
+  preds, loss = model(X, Y)
+
+  if loss is not None:
+    # reset gradients
+    optimizer.zero_grad()
+
+    # calculate gradients from loss
+    loss.backward()
+
+    # update weights
+    optimizer.step()
+    lossi.append(loss.item())
+
+with torch.no_grad():
+  X = torch.Tensor([[[0.2], [0.5], [0.8]]])
+
+  Preds, _ = model(X, Y)
+
+print(f"X shape {X.shape}")
+print(f"Preds shape {Preds.shape}")
+
+X = torch.squeeze(X, dim=0)
+Preds = torch.squeeze(Preds, dim=0)
+
+print(f"Prices: {X}")
+print(f"Preds: {Preds}")
+
+# Plot the loss
+plt.plot(lossi, label='Training Loss')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('Training Loss over Iterations')
+plt.legend()
+plt.show()
+
+vliser.plot(X, Preds, width=16)
+
+
+'''
+
+
+# training run
+
+
+
+# load the data into our program
+
+dataLoader = DataLoader(model_config, batch_size=4)
+
+data_file = "data.txt"
+
+dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2024-01-01')
+
+dataLoader.load_data_from_file("data.txt", model_config.block_size)
+
+price_inputs, targets = dataLoader.restructure_data()
+
+
+epochs = 10
 
 while True:
 
@@ -425,7 +517,7 @@ while True:
 
   # load batch
   X, Y = dataLoader.load_next_batch()
-  
+
   # get prediction
   preds, loss = model(X, Y)
 
@@ -442,6 +534,7 @@ while True:
 
     # get last prediction from model
     pred = preds[:, -1, -1, -1]
+    print(f"Prediction from model: {pred}")
 
 
 
@@ -462,10 +555,6 @@ while True:
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
     # stop training
     break
-
-
-print(f"dataloader data_dict: {dataLoader.data_dict}")
-
 
 # let's visualize how our model performs
 vliser = Visualizer()
@@ -488,3 +577,5 @@ print(f"preds {preds}")
 
 vliser.plot('TLSA', real_prices, preds, width=16)
 
+
+'''
