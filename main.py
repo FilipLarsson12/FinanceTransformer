@@ -122,6 +122,8 @@ class FinanceTransformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        assert config.block_size is not None
+        self.block_size = config.block_size
         self.embedding = nn.Linear(config.input_dim, config.embd_dim)
         # self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
 
@@ -133,13 +135,14 @@ class FinanceTransformer(nn.Module):
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
+
     def forward(self, x, targets=None):
         print(f"Input to FinanceTransformer: {x}")
 
         _, T, _ = x.size()
         print(f"Sequence length T: {T}")
 
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
 
         # input dim is: (batch_am, block_size, 1)
         x = self.embedding(x) # (batch_am, block_size, embd_dim)
@@ -433,13 +436,16 @@ model.train()
 
 # define loss function and optimizer
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 vliser = Visualizer()
 
-# alt training run
-
+# track losses
 lossi = []
+
+'''
+
+# alt training run for experiments
 
 for i in range(200):
   X = torch.Tensor([[[0.2], [0.5], [0.8]],
@@ -487,13 +493,10 @@ plt.show()
 
 vliser.plot(X, Preds, width=16)
 
-
 '''
 
 
 # training run
-
-
 
 # load the data into our program
 
@@ -508,7 +511,7 @@ dataLoader.load_data_from_file("data.txt", model_config.block_size)
 price_inputs, targets = dataLoader.restructure_data()
 
 
-epochs = 10
+epochs = 20
 
 while True:
 
@@ -530,12 +533,8 @@ while True:
 
     # update weights
     optimizer.step()
-  else:
 
-    # get last prediction from model
-    pred = preds[:, -1, -1, -1]
-    print(f"Prediction from model: {pred}")
-
+    lossi.append(loss.item())
 
 
   print(f"epoch {epoch}, loss {loss}")
@@ -557,25 +556,35 @@ while True:
     break
 
 # let's visualize how our model performs
-vliser = Visualizer()
 
 with torch.no_grad():
 
-  reshaped_data_for_model, real_prices = dataLoader.load_data_for_plot_inference('MSFT', model_config.block_size*5)
-  preds = model.generate(reshaped_data_for_model, multiple=True)
+  price_inputs = price_inputs.squeeze(0)
 
-# remove first {block_size} price points before plotting because those are only used for first context
-real_prices = real_prices[model_config.block_size:]
-print(f"original_data shape {real_prices.shape}")
 
-# remove last pred because we cant compare that in a plot to an existing price point
-preds = preds[:-1]
+
+
+  preds, _ = model(price_inputs)
+
+price_inputs = price_inputs.view(price_inputs.shape[0]*price_inputs.shape[1])
+preds = preds.view(preds.shape[0]*preds.shape[1])
+
+print(f"price_inputs shape {price_inputs.shape}")
+
 print(f"preds shape {preds.shape}")
 
-print(f"real prices {real_prices}")
+print(f"price_inputs {price_inputs}")
 print(f"preds {preds}")
 
-vliser.plot('TLSA', real_prices, preds, width=16)
+# Plot the loss
+plt.plot(lossi, label='Training Loss')
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('Training Loss over Iterations')
+plt.legend()
+plt.show()
+
+vliser.plot(price_inputs, preds, width=16)
 
 
-'''
+
