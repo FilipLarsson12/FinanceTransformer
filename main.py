@@ -7,12 +7,16 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# class that defines the self attention layers
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
+# Function to plot heatmap for weights
+def plot_heatmap(data, title):
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, vmin=-1.0, vmax=1.0)
+    plt.title(title)
+    plt.xlabel('Weight Matrix Columns')
+    plt.ylabel('Weight Matrix Rows')
+    plt.show()
 
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
@@ -49,7 +53,16 @@ class SelfAttentionLayer(nn.Module):
         # calculating how much the embeddings "care" about one another
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
-        keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+
+        print(f"keyquery matrix before scaling: {keyquery_matrix}")
+
+        scaling_factor = 1.0 / math.sqrt(k.size(-1))
+        keyquery_matrix *= scaling_factor
+        print(f"keyquery matrix after scaling: {keyquery_matrix}")
+
+        print(f"Scaling factor: {scaling_factor}")
+
+
         print(f"keyquery matrix shape: {keyquery_matrix.shape}")
         print(f"keyquery matrix before applying bias: {keyquery_matrix}")
 
@@ -124,16 +137,34 @@ class FinanceTransformer(nn.Module):
         self.config = config
         assert config.block_size is not None
         self.block_size = config.block_size
-        self.embedding = nn.Linear(config.input_dim, config.embd_dim)
+        self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
         # self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
-
-        self.layers = nn.ModuleList(
-            [
-                Block(config) for _ in range(config.n_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
+
+        # Apply custom weight initialization
+        self.apply(self.custom_weight_init)
+
+
+    # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
+    def custom_weight_init(self, module):
+        if isinstance(module, nn.Linear):
+            fan_in = module.weight.data.size(1)  # number of input units
+            std = 1.0 / math.sqrt(fan_in)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            fan_in = module.weight.data.size(1) # number of inputs units
+            std = 1.0 / math.sqrt(fan_in)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
 
 
     def forward(self, x, targets=None):
@@ -145,7 +176,7 @@ class FinanceTransformer(nn.Module):
         assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
 
         # input dim is: (batch_am, block_size, 1)
-        x = self.embedding(x) # (batch_am, block_size, embd_dim)
+        x = self.price_embeddings(x) # (batch_am, block_size, embd_dim)
         print(f"After embedding: {x}")
         for i, block in enumerate(self.layers):
             print(f"Passing through block {i}")
@@ -165,7 +196,7 @@ class FinanceTransformer(nn.Module):
             preds = self.predictionlayer(x) # (batch_am, block_size, 1)
             print(f"Predictions: {preds}")
             loss = None
-        
+
         return preds, loss
 
     # to generate next price point from the model or to generate multiple price points for plotting for example
@@ -192,7 +223,7 @@ class FinanceTransformer(nn.Module):
 
 class Visualizer():
 
-    def plot(self, actual_prices, preds, width=10, downsample_factor=1):
+    def plot_preds(self, actual_prices, preds, width=10, downsample_factor=1):
         actual_prices = np.array(actual_prices)
         preds = np.array(preds)
 
@@ -205,7 +236,7 @@ class Visualizer():
         plt.figure(figsize=(width, 6))
 
         # Plot the points with labels
-        plt.plot(actual_prices, color='blue', linestyle='-', marker='o', markersize=2, linewidth=1, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
+        plt.plot(actual_prices, color='blue', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
         plt.plot(preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
         plt.title('Stock Price Plot')
@@ -214,6 +245,17 @@ class Visualizer():
         plt.grid(True)
         plt.legend()  # Add a legend to the plot
         plt.show()
+
+
+    def plot_loss(self, lossi):
+
+      # Plot the loss
+      plt.plot(lossi, label='Training Loss')
+      plt.xlabel('Iteration')
+      plt.ylabel('Loss')
+      plt.title('Training Loss over Iterations')
+      plt.legend()
+      plt.show()
 
 
 
@@ -226,7 +268,7 @@ class DataLoader():
     self.config = config
     self.batch_size = batch_size
     self.data_dict = {}
-    
+
     # used to keep track of what batch to return when load_next_batch() is called
     self.currentTickerIndex = 0
     self.indexWithinTicker = 0
@@ -286,7 +328,7 @@ class DataLoader():
 
 
   def load_next_batch(self):
-     
+
     # go to next ticker if next batch exceeds remaining current ticker data
     if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
       # if we're at the last ticker go to first ticker and increment epoch
@@ -294,10 +336,10 @@ class DataLoader():
         self.currentTickerIndex = 0
         self.currentEpoch += 1
 
-      else: 
+      else:
         self.currentTickerIndex += 1
       self.indexWithinTicker = 0
-    
+
     # placeholders
     outerIdx = self.currentTickerIndex
     innerIdx = self.indexWithinTicker
@@ -352,7 +394,7 @@ class DataLoader():
       targets_reshaped = targets.view(targets.shape[0], -1)
       inputs_reshaped = inputs_reshaped[:, 1:]
       targets_reshaped = targets_reshaped[:, :-1]
-      
+
     # in case we only have one ticker
     else:
       inputs_reshaped = inputs_reshaped.view(-1)
@@ -422,7 +464,7 @@ class DataLoader():
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 4
+    embd_dim = 16
     block_size = 3
     n_layers = 1
 
@@ -430,6 +472,8 @@ class ModelConfig():
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
+
+'''
 
 # training loop
 model.train()
@@ -443,7 +487,9 @@ vliser = Visualizer()
 # track losses
 lossi = []
 
-'''
+
+
+
 
 # alt training run for experiments
 
@@ -493,7 +539,7 @@ plt.show()
 
 vliser.plot(X, Preds, width=16)
 
-'''
+
 
 
 # training run
@@ -576,15 +622,9 @@ print(f"preds shape {preds.shape}")
 print(f"price_inputs {price_inputs}")
 print(f"preds {preds}")
 
-# Plot the loss
-plt.plot(lossi, label='Training Loss')
-plt.xlabel('Iteration')
-plt.ylabel('Loss')
-plt.title('Training Loss over Iterations')
-plt.legend()
-plt.show()
+vliser.plot_loss(lossi)
 
-vliser.plot(price_inputs, preds, width=16)
+vliser.plot_preds(price_inputs, preds, width=16)
 
-
+'''
 
