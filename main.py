@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Function to plot heatmap for weights
-def plot_heatmap(data, title):
+def plot_heatmap(data, title, vmin=None, vmax=None):
     plt.figure(figsize=(10, 8))
-    sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, vmin=-1.0, vmax=1.0)
+    sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, vmin=vmin, vmax=vmax)
     plt.title(title)
     plt.xlabel('Weight Matrix Columns')
     plt.ylabel('Weight Matrix Rows')
@@ -26,8 +26,17 @@ class SelfAttentionLayer(nn.Module):
         # we use a linear layer to produce the k, q and v.
         # we use the same dimensionality for them as the embd_dim
         self.config = config
-        # to calculate k, q and v
-        self.calc_kqv = nn.Linear(config.embd_dim, config.embd_dim * 3)
+        self.embd_dim = config.embd_dim
+
+        # to calculate k, q and v, had trouble with k and q getting zero grads with elegant method so thinking of switching to regular
+
+        if config.elegant_kqv:
+          self.calc_kqv = nn.Linear(config.embd_dim, 3 * config.embd_dim)
+        else:
+          self.calc_k = nn.Linear(config.embd_dim, config.embd_dim)
+          self.calc_q = nn.Linear(config.embd_dim, config.embd_dim)
+          self.calc_v = nn.Linear(config.embd_dim, config.embd_dim)
+
         # final proj before return
         self.proj = nn.Linear(config.embd_dim, config.embd_dim)
         # register parameter for the lower triangular mask-matrix
@@ -41,11 +50,14 @@ class SelfAttentionLayer(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embd_dim
         print(f"B: {B}, T: {T}, C: {C}")
 
-        kqv = self.calc_kqv(x)
-        print(f"kqv: {kqv}")
+        if self.config.elegant_kqv:
+          kqv = self.calc_kqv(x)
+          k, q, v = kqv.split(self.embd_dim, dim=2)
+        else:       
+          k = self.calc_k(x)
+          q = self.calc_q(x)
+          v = self.calc_v(x)
 
-        # splitting so I have key, query and value
-        k, q, v = kqv.split(self.config.embd_dim, dim=-1)
         print(f"k: {k}")
         print(f"q: {q}")
         print(f"v: {v}")
@@ -53,16 +65,7 @@ class SelfAttentionLayer(nn.Module):
         # calculating how much the embeddings "care" about one another
         # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
-
-        print(f"keyquery matrix before scaling: {keyquery_matrix}")
-
-        scaling_factor = 1.0 / math.sqrt(k.size(-1))
-        keyquery_matrix *= scaling_factor
-        print(f"keyquery matrix after scaling: {keyquery_matrix}")
-
-        print(f"Scaling factor: {scaling_factor}")
-
-
+        keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
         print(f"keyquery matrix shape: {keyquery_matrix.shape}")
         print(f"keyquery matrix before applying bias: {keyquery_matrix}")
 
@@ -111,21 +114,14 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.normlayer_1 = nn.LayerNorm(config.embd_dim)
-        self.attentionlayer = SelfAttentionLayer(config)
-        self.normlayer_2 = nn.LayerNorm(config.embd_dim)
+        self.ln_1 = nn.LayerNorm(config.embd_dim)
+        self.attn = SelfAttentionLayer(config)
+        self.ln_2 = nn.LayerNorm(config.embd_dim)
         self.mlp = MLP(config)
 
     def forward(self, x):
-        print(f"Input to Block: {x}")
-        x = self.normlayer_1(x)
-        print(f"After normlayer_1: {x}")
-        x = self.attentionlayer(x)
-        print(f"After attentionlayer: {x}")
-        x = self.normlayer_2(x)
-        print(f"After normlayer_2: {x}")
-        x = self.mlp(x)
-        print(f"Output of Block: {x}")
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -152,9 +148,9 @@ class FinanceTransformer(nn.Module):
         if isinstance(module, nn.Linear):
             fan_in = module.weight.data.size(1)  # number of input units
             std = 1.0 / math.sqrt(fan_in)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}', vmin=-1.0, vmax=1.0)
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}', vmin=-1.0, vmax=1.0)
 
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -164,6 +160,39 @@ class FinanceTransformer(nn.Module):
             plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
+    def plot_heatmap_all_or_specific(self, plot_type='weights', module_name='all', vmin=None, vmax=None):
+        """
+        Plot heatmap for weights or gradients for all modules or a specific module.
+        
+        Args:
+            plot_type (str): 'weights' to plot weights, 'grads' to plot gradients.
+            module_name (str): 'all' to plot all modules or specify the module name.
+            vmin (float): Minimum value for color bar.
+            vmax (float): Maximum value for color bar.
+        """
+        for name, module in self.named_modules():
+            if module_name != 'all' and name != module_name:
+                continue
+
+            if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
+                data = None
+                if plot_type == 'weights':
+                    data = module.weight.detach().cpu().numpy()
+                elif plot_type == 'grads' and module.weight.grad is not None:
+                    data = module.weight.grad.cpu().detach().numpy()
+
+                if data is not None:
+                    plot_heatmap(data, f'{plot_type.capitalize()} for {name}', vmin, vmax)
+                else:
+                    print(f"No {plot_type} data for {name}.")
+                    
+                if module_name != 'all':
+                    break
+            else:
+                if module_name != 'all':
+                    print(f"Module {name} does not have weights.")
+                    break
 
 
 
@@ -464,22 +493,22 @@ class DataLoader():
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 16
+    embd_dim = 5
     block_size = 3
     n_layers = 1
+    elegant_kqv = False
 
 #init
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 
-'''
+
 
 # training loop
 model.train()
 
 # define loss function and optimizer
-loss_fn = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 vliser = Visualizer()
@@ -493,12 +522,12 @@ lossi = []
 
 # alt training run for experiments
 
-for i in range(200):
+for i in range(50):
   X = torch.Tensor([[[0.2], [0.5], [0.8]],
                     [[0.2], [0.5], [0.8]],
                     ])
   Y = torch.Tensor([[[0.5], [0.8], [1.0]],
-                    [[0.2], [0.5], [0.8]]
+                    [[0.5], [0.8], [1.0]]
                     ])
 
   # get prediction
@@ -510,6 +539,16 @@ for i in range(200):
 
     # calculate gradients from loss
     loss.backward()
+
+
+    if (i % 1 == 0):
+      if model_config.elegant_kqv:
+        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_kqv')
+      else:
+        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_k')
+        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_q')
+        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_v')
+
 
     # update weights
     optimizer.step()
@@ -537,10 +576,10 @@ plt.title('Training Loss over Iterations')
 plt.legend()
 plt.show()
 
-vliser.plot(X, Preds, width=16)
+vliser.plot_preds(X, Preds, width=16)
 
 
-
+'''
 
 # training run
 
@@ -550,14 +589,14 @@ dataLoader = DataLoader(model_config, batch_size=4)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2024-01-01')
+dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2020-01-01')
 
 dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
 price_inputs, targets = dataLoader.restructure_data()
 
 
-epochs = 20
+epochs = 5
 
 while True:
 
@@ -576,6 +615,11 @@ while True:
 
     # calculate gradients from loss
     loss.backward()
+
+    if dataLoader.currentBatch == 1:
+      # Plot gradients
+      model.plot_gradients()
+      
 
     # update weights
     optimizer.step()
@@ -600,6 +644,8 @@ while True:
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
     # stop training
     break
+
+
 
 # let's visualize how our model performs
 
@@ -626,5 +672,6 @@ vliser.plot_loss(lossi)
 
 vliser.plot_preds(price_inputs, preds, width=16)
 
+# Plot gradients
+model.plot_gradients()
 '''
-
