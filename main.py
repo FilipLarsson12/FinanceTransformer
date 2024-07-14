@@ -18,6 +18,14 @@ def plot_heatmap(data, title, vmin=None, vmax=None):
     plt.ylabel('Weight Matrix Rows')
     plt.show()
 
+def plot_1d(data, title):
+    plt.figure(figsize=(10, 4))
+    plt.plot(data, marker='o')
+    plt.title(title)
+    plt.xlabel('Weight Index')
+    plt.ylabel('Weight Value')
+    plt.show()
+
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
 
@@ -31,11 +39,11 @@ class SelfAttentionLayer(nn.Module):
         # to calculate k, q and v, had trouble with k and q getting zero grads with elegant method so thinking of switching to regular
 
         if config.elegant_kqv:
-          self.calc_kqv = nn.Linear(config.embd_dim, 3 * config.embd_dim)
+            self.calc_kqv = nn.Linear(config.embd_dim, 3 * config.embd_dim)
         else:
-          self.calc_k = nn.Linear(config.embd_dim, config.embd_dim)
-          self.calc_q = nn.Linear(config.embd_dim, config.embd_dim)
-          self.calc_v = nn.Linear(config.embd_dim, config.embd_dim)
+            self.calc_k = nn.Linear(config.embd_dim, config.embd_dim)
+            self.calc_q = nn.Linear(config.embd_dim, config.embd_dim)
+            self.calc_v = nn.Linear(config.embd_dim, config.embd_dim)
 
         # final proj before return
         self.proj = nn.Linear(config.embd_dim, config.embd_dim)
@@ -45,25 +53,24 @@ class SelfAttentionLayer(nn.Module):
         .view(1, config.block_size, config.block_size))
 
     def forward(self, x):
-        print(f"Input to SelfAttentionLayer: {x}")
+        print(f"Before going into SelfAttentionLayer: {x}")
 
         B, T, C = x.size() # batch size, sequence length, embd_dim
         print(f"B: {B}, T: {T}, C: {C}")
 
         if self.config.elegant_kqv:
-          kqv = self.calc_kqv(x)
-          k, q, v = kqv.split(self.embd_dim, dim=2)
-        else:       
-          k = self.calc_k(x)
-          q = self.calc_q(x)
-          v = self.calc_v(x)
+            kqv = self.calc_kqv(x)
+            k, q, v = kqv.split(self.embd_dim, dim=2)
+        else:
+            k = self.calc_k(x)
+            q = self.calc_q(x)
+            v = self.calc_v(x)
 
-        print(f"k: {k}")
-        print(f"q: {q}")
-        print(f"v: {v}")
+        print(f"Keys (k): {k}")
+        print(f"Queries (q): {q}")
+        print(f"Values (v): {v}")
 
         # calculating how much the embeddings "care" about one another
-        # i.e calculating how much information should flow between the different embeddings
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
         print(f"keyquery matrix shape: {keyquery_matrix.shape}")
@@ -98,13 +105,13 @@ class MLP(nn.Module):
         self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
 
     def forward(self, x):
-        print(f"Input to MLP: {x}")
+        print(f"Before going into MLP: {x}")
         x = self.proj_1(x)
         print(f"After proj_1: {x}")
         x = self.gelu(x)
         print(f"After GELU: {x}")
         x = self.proj_2(x)
-        print(f"Output of MLP: {x}")
+        print(f"After proj_2 (Output of MLP): {x}")
         return x
 
 
@@ -120,8 +127,15 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        print(f"Before going into Block LayerNorm 1: {x}")
+        x = self.ln_1(x)
+        print(f"After Block LayerNorm 1: {x}")
+        x = self.attn(x)
+        print(f"After Block Attention Layer: {x}")
+        x = self.ln_2(x)
+        print(f"After Block LayerNorm 2: {x}")
+        x = self.mlp(x)
+        print(f"After Block MLP (Output of Block): {x}")
         return x
 
 
@@ -134,13 +148,13 @@ class FinanceTransformer(nn.Module):
         assert config.block_size is not None
         self.block_size = config.block_size
         self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        # self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
+        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
         self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
 
         # Apply custom weight initialization
-        self.apply(self.custom_weight_init)
+        # self.apply(self.custom_weight_init)
 
 
     # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
@@ -164,7 +178,7 @@ class FinanceTransformer(nn.Module):
     def plot_heatmap_all_or_specific(self, plot_type='weights', module_name='all', vmin=None, vmax=None):
         """
         Plot heatmap for weights or gradients for all modules or a specific module.
-        
+
         Args:
             plot_type (str): 'weights' to plot weights, 'grads' to plot gradients.
             module_name (str): 'all' to plot all modules or specify the module name.
@@ -175,29 +189,34 @@ class FinanceTransformer(nn.Module):
             if module_name != 'all' and name != module_name:
                 continue
 
-            if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
-                data = None
-                if plot_type == 'weights':
+            data = None
+            if plot_type == 'weights':
+                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
                     data = module.weight.detach().cpu().numpy()
-                elif plot_type == 'grads' and module.weight.grad is not None:
-                    data = module.weight.grad.cpu().detach().numpy()
+            elif plot_type == 'grads':
+                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
+                    if module.weight.grad is not None:
+                        data = module.weight.grad.cpu().detach().numpy()
 
-                if data is not None:
+            if data is not None:
+                if data.ndim == 2:
                     plot_heatmap(data, f'{plot_type.capitalize()} for {name}', vmin, vmax)
+                elif data.ndim == 1:
+                    plot_1d(data, f'{plot_type.capitalize()} for {name}')
                 else:
-                    print(f"No {plot_type} data for {name}.")
-                    
-                if module_name != 'all':
-                    break
+                    print(f"No {plot_type} data for {name} or data is not 1D/2D.")
             else:
-                if module_name != 'all':
-                    print(f"Module {name} does not have weights.")
-                    break
+                print(f"No {plot_type} data for {name}.")
 
+            if module_name != 'all':
+                break
+        else:
+            if module_name != 'all':
+                print(f"Module {module_name} not found in the model.")
 
 
     def forward(self, x, targets=None):
-        print(f"Input to FinanceTransformer: {x}")
+        print(f"Before going into Price Embedding Layer: {x}")
 
         _, T, _ = x.size()
         print(f"Sequence length T: {T}")
@@ -205,14 +224,26 @@ class FinanceTransformer(nn.Module):
         assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
 
         # input dim is: (batch_am, block_size, 1)
-        x = self.price_embeddings(x) # (batch_am, block_size, embd_dim)
-        print(f"After embedding: {x}")
+
+
+        pos = torch.arange(0, T, dtype=torch.long) # shape (T)
+        pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
+        print(f"positional embeddings: {pos_emb}")
+        price_emb = self.price_embeddings(x) # price embeddings of shape (B, T, embd_dim)
+        print(f"price embeddings: {price_emb}")
+
+        # adding positional embeddings to the price embeddings
+        x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)        
+
+        print(f"After Price + Pos Embedding Layer: {x}")
+
         for i, block in enumerate(self.layers):
-            print(f"Passing through block {i}")
+            print(f"Before going into Block {i}: {x}")
             x = block(x) # (batch_am, block_size, embd_dim)
-        print("Data shape after attention: ", x.shape)
+            print(f"After Block {i}: {x}")
+
         x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
-        print(f"After final_normlayer: {x}")
+        print(f"After Final LayerNorm: {x}")
 
         if targets is not None:
             # now we get predictions at every position in the sequence in every batch
@@ -227,6 +258,7 @@ class FinanceTransformer(nn.Module):
             loss = None
 
         return preds, loss
+
 
     # to generate next price point from the model or to generate multiple price points for plotting for example
     def generate(self, context, multiple=None):
@@ -308,13 +340,13 @@ class DataLoader():
     self.currentEpoch = 1
     self.currentBatch = 0
 
-  # Function to normalize the prices
+  # Function to normalize the prices using z-normalization
   def normalize(self, prices):
-      min_price = np.min(prices)
-      max_price = np.max(prices)
-      self.min_price = min_price
-      self.max_price = max_price
-      normalized_prices = (prices - min_price) / (max_price - min_price)
+      mean_price = np.mean(prices)
+      std_price = np.std(prices)
+      self.mean_price = mean_price
+      self.std_price = std_price
+      normalized_prices = (prices - mean_price) / std_price
       return normalized_prices
 
   def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate):
@@ -493,8 +525,8 @@ class DataLoader():
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 5
-    block_size = 3
+    embd_dim = 4
+    block_size = 4
     n_layers = 1
     elegant_kqv = False
 
@@ -509,7 +541,7 @@ model = FinanceTransformer(model_config)
 model.train()
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
 
 vliser = Visualizer()
 
@@ -517,18 +549,20 @@ vliser = Visualizer()
 lossi = []
 
 
-
+'''
 
 
 # alt training run for experiments
 
-for i in range(50):
-  X = torch.Tensor([[[0.2], [0.5], [0.8]],
-                    [[0.2], [0.5], [0.8]],
-                    ])
-  Y = torch.Tensor([[[0.5], [0.8], [1.0]],
-                    [[0.5], [0.8], [1.0]]
-                    ])
+X = torch.Tensor([
+    [[0.4], [2.2]]
+])
+
+Y = torch.Tensor([
+     [[2.2], [1.6]]
+])
+
+for i in range(20):
 
   # get prediction
   preds, loss = model(X, Y)
@@ -541,13 +575,11 @@ for i in range(50):
     loss.backward()
 
 
-    if (i % 1 == 0):
+    if (i % 10 == 0):
       if model_config.elegant_kqv:
         model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_kqv')
       else:
-        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_k')
-        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_q')
-        model.plot_heatmap_all_or_specific('grads', 'layers.0.attn.calc_v')
+        model.plot_heatmap_all_or_specific(plot_type='grads')
 
 
     # update weights
@@ -555,17 +587,18 @@ for i in range(50):
     lossi.append(loss.item())
 
 with torch.no_grad():
-  X = torch.Tensor([[[0.2], [0.5], [0.8]]])
 
-  Preds, _ = model(X, Y)
+  Preds, _ = model(X)
 
-print(f"X shape {X.shape}")
+
+Y = Y.view(-1)
+Preds = Preds.view(-1)
+print(f"Y shape {Y.shape}")
 print(f"Preds shape {Preds.shape}")
 
-X = torch.squeeze(X, dim=0)
 Preds = torch.squeeze(Preds, dim=0)
 
-print(f"Prices: {X}")
+print(f"Prices: {Y}")
 print(f"Preds: {Preds}")
 
 # Plot the loss
@@ -576,29 +609,31 @@ plt.title('Training Loss over Iterations')
 plt.legend()
 plt.show()
 
-vliser.plot_preds(X, Preds, width=16)
-
+vliser.plot_preds(Y, Preds, width=16)
 
 '''
+
 
 # training run
 
 # load the data into our program
 
-dataLoader = DataLoader(model_config, batch_size=4)
+dataLoader = DataLoader(model_config, batch_size=2)
 
 data_file = "data.txt"
 
-dataLoader.load_data_from_yfinance(['TLSA'], data_file, startDate='2015-01-01', endDate='2020-01-01')
+dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-04-01')
 
 dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
 price_inputs, targets = dataLoader.restructure_data()
 
 
-epochs = 5
+epochs = 10
 
 while True:
+
+  print("START OF TRAINING -------------")
 
   # placeholder
   epoch = dataLoader.currentEpoch
@@ -616,16 +651,16 @@ while True:
     # calculate gradients from loss
     loss.backward()
 
-    if dataLoader.currentBatch == 1:
-      # Plot gradients
-      model.plot_gradients()
-      
+
+
 
     # update weights
     optimizer.step()
 
     lossi.append(loss.item())
 
+    if (loss.item() < 0.01):
+      break
 
   print(f"epoch {epoch}, loss {loss}")
 
@@ -643,6 +678,8 @@ while True:
     print(f"first loss: {first_loss}, last loss: {last_loss}")
     print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
     # stop training
+    print("END OF TRAINING -------------")
+
     break
 
 
@@ -654,7 +691,7 @@ with torch.no_grad():
   price_inputs = price_inputs.squeeze(0)
 
 
-
+  print(f"price_inputs shape before doing inference: {price_inputs.shape}")
 
   preds, _ = model(price_inputs)
 
@@ -668,10 +705,11 @@ print(f"preds shape {preds.shape}")
 print(f"price_inputs {price_inputs}")
 print(f"preds {preds}")
 
+print(f"losses: {lossi}")
+
 vliser.plot_loss(lossi)
 
 vliser.plot_preds(price_inputs, preds, width=16)
 
-# Plot gradients
-model.plot_gradients()
-'''
+
+
