@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
 
 # Function to plot heatmap for weights
 def plot_heatmap(data, title, vmin=None, vmax=None):
@@ -137,148 +138,6 @@ class Block(nn.Module):
         x = self.mlp(x)
         print(f"After Block MLP (Output of Block): {x}")
         return x
-
-
-# model class
-class FinanceTransformer(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        assert config.block_size is not None
-        self.block_size = config.block_size
-        self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
-        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
-        self.final_normlayer = nn.LayerNorm(config.embd_dim)
-        self.predictionlayer = nn.Linear(config.embd_dim, 1)
-
-        # Apply custom weight initialization
-        # self.apply(self.custom_weight_init)
-
-
-    # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
-    def custom_weight_init(self, module):
-        if isinstance(module, nn.Linear):
-            fan_in = module.weight.data.size(1)  # number of input units
-            std = 1.0 / math.sqrt(fan_in)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}', vmin=-1.0, vmax=1.0)
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}', vmin=-1.0, vmax=1.0)
-
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            fan_in = module.weight.data.size(1) # number of inputs units
-            std = 1.0 / math.sqrt(fan_in)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
-
-    def plot_heatmap_all_or_specific(self, plot_type='weights', module_name='all', vmin=None, vmax=None):
-        """
-        Plot heatmap for weights or gradients for all modules or a specific module.
-
-        Args:
-            plot_type (str): 'weights' to plot weights, 'grads' to plot gradients.
-            module_name (str): 'all' to plot all modules or specify the module name.
-            vmin (float): Minimum value for color bar.
-            vmax (float): Maximum value for color bar.
-        """
-        for name, module in self.named_modules():
-            if module_name != 'all' and name != module_name:
-                continue
-
-            data = None
-            if plot_type == 'weights':
-                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
-                    data = module.weight.detach().cpu().numpy()
-            elif plot_type == 'grads':
-                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
-                    if module.weight.grad is not None:
-                        data = module.weight.grad.cpu().detach().numpy()
-
-            if data is not None:
-                if data.ndim == 2:
-                    plot_heatmap(data, f'{plot_type.capitalize()} for {name}', vmin, vmax)
-                elif data.ndim == 1:
-                    plot_1d(data, f'{plot_type.capitalize()} for {name}')
-                else:
-                    print(f"No {plot_type} data for {name} or data is not 1D/2D.")
-            else:
-                print(f"No {plot_type} data for {name}.")
-
-            if module_name != 'all':
-                break
-        else:
-            if module_name != 'all':
-                print(f"Module {module_name} not found in the model.")
-
-
-    def forward(self, x, targets=None):
-        print(f"Before going into Price Embedding Layer: {x}")
-
-        _, T, _ = x.size()
-        print(f"Sequence length T: {T}")
-
-        assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
-
-        # input dim is: (batch_am, block_size, 1)
-
-
-        pos = torch.arange(0, T, dtype=torch.long) # shape (T)
-        pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
-        print(f"positional embeddings: {pos_emb}")
-        price_emb = self.price_embeddings(x) # price embeddings of shape (B, T, embd_dim)
-        print(f"price embeddings: {price_emb}")
-
-        # adding positional embeddings to the price embeddings
-        x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)        
-
-        print(f"After Price + Pos Embedding Layer: {x}")
-
-        for i, block in enumerate(self.layers):
-            print(f"Before going into Block {i}: {x}")
-            x = block(x) # (batch_am, block_size, embd_dim)
-            print(f"After Block {i}: {x}")
-
-        x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
-        print(f"After Final LayerNorm: {x}")
-
-        if targets is not None:
-            # now we get predictions at every position in the sequence in every batch
-            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
-            print(f"Predictions: {preds}")
-            loss_fn = nn.MSELoss()
-            loss = loss_fn(preds, targets)
-            print(f"Loss: {loss}")
-        else:
-            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
-            print(f"Predictions: {preds}")
-            loss = None
-
-        return preds, loss
-
-
-    # to generate next price point from the model or to generate multiple price points for plotting for example
-    def generate(self, context, multiple=None):
-        print(f"Input to generate: {context}")
-
-        if multiple:
-            print("Generate multiple")
-            preds, _ = self(context)
-            print(f"Preds shape: {preds.shape}")
-            preds = preds[:, -1, -1]
-            print(f"Output preds: {preds}")
-            return preds
-
-        else:
-            pred, _ = self(context)
-            print(f"Single pred before reshape: {pred}")
-            pred = pred[-1, -1, -1]
-            print(f"Output pred: {pred}")
-            return pred
-
 
 
 
@@ -518,6 +377,147 @@ class DataLoader():
 
         return self.all_price_inputs, self.all_targets
 
+
+# model class
+class FinanceTransformer(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        assert config.block_size is not None
+        self.block_size = config.block_size
+        self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
+        self.final_normlayer = nn.LayerNorm(config.embd_dim)
+        self.predictionlayer = nn.Linear(config.embd_dim, 1)
+
+        # Apply custom weight initialization
+        # self.apply(self.custom_weight_init)
+
+
+    # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
+    def custom_weight_init(self, module):
+        if isinstance(module, nn.Linear):
+            fan_in = module.weight.data.size(1)  # number of input units
+            std = 1.0 / math.sqrt(fan_in)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}', vmin=-1.0, vmax=1.0)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}', vmin=-1.0, vmax=1.0)
+
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            fan_in = module.weight.data.size(1) # number of inputs units
+            std = 1.0 / math.sqrt(fan_in)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
+    def plot_heatmap_all_or_specific(self, plot_type='weights', module_name='all', vmin=None, vmax=None):
+        """
+        Plot heatmap for weights or gradients for all modules or a specific module.
+
+        Args:
+            plot_type (str): 'weights' to plot weights, 'grads' to plot gradients.
+            module_name (str): 'all' to plot all modules or specify the module name.
+            vmin (float): Minimum value for color bar.
+            vmax (float): Maximum value for color bar.
+        """
+        for name, module in self.named_modules():
+            if module_name != 'all' and name != module_name:
+                continue
+
+            data = None
+            if plot_type == 'weights':
+                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
+                    data = module.weight.detach().cpu().numpy()
+            elif plot_type == 'grads':
+                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
+                    if module.weight.grad is not None:
+                        data = module.weight.grad.cpu().detach().numpy()
+
+            if data is not None:
+                if data.ndim == 2:
+                    plot_heatmap(data, f'{plot_type.capitalize()} for {name}', vmin, vmax)
+                elif data.ndim == 1:
+                    plot_1d(data, f'{plot_type.capitalize()} for {name}')
+                else:
+                    print(f"No {plot_type} data for {name} or data is not 1D/2D.")
+            else:
+                print(f"No {plot_type} data for {name}.")
+
+            if module_name != 'all':
+                break
+        else:
+            if module_name != 'all':
+                print(f"Module {module_name} not found in the model.")
+
+
+    def forward(self, x, targets=None):
+        print(f"Before going into Price Embedding Layer: {x}")
+
+        _, T, _ = x.size()
+        print(f"Sequence length T: {T}")
+
+        assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
+
+        # input dim is: (batch_am, block_size, 1)
+
+
+        pos = torch.arange(0, T, dtype=torch.long) # shape (T)
+        pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
+        print(f"positional embeddings: {pos_emb}")
+        price_emb = self.price_embeddings(x) # price embeddings of shape (B, T, embd_dim)
+        print(f"price embeddings: {price_emb}")
+
+        # adding positional embeddings to the price embeddings
+        x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)
+
+        print(f"After Price + Pos Embedding Layer: {x}")
+
+        for i, block in enumerate(self.layers):
+            print(f"Before going into Block {i}: {x}")
+            x = block(x) # (batch_am, block_size, embd_dim)
+            print(f"After Block {i}: {x}")
+
+        x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
+        print(f"After Final LayerNorm: {x}")
+
+        if targets is not None:
+            # now we get predictions at every position in the sequence in every batch
+            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            print(f"Predictions: {preds}")
+            loss_fn = nn.MSELoss()
+            loss = loss_fn(preds, targets)
+            print(f"Loss: {loss}")
+        else:
+            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            print(f"Predictions: {preds}")
+            loss = None
+
+        return preds, loss
+
+
+    # to generate next price point from the model or to generate multiple price points for plotting for example
+    def generate(self, context, multiple=None):
+        print(f"Input to generate: {context}")
+
+        if multiple:
+            print("Generate multiple")
+            preds, _ = self(context)
+            print(f"Preds shape: {preds.shape}")
+            preds = preds[:, -1, -1]
+            print(f"Output preds: {preds}")
+            return preds
+
+        else:
+            pred, _ = self(context)
+            print(f"Single pred before reshape: {pred}")
+            pred = pred[-1, -1, -1]
+            print(f"Output pred: {pred}")
+            return pred
+
 # ----------------------------------------------------------------------------------------
 
 
@@ -526,7 +526,7 @@ class DataLoader():
 class ModelConfig():
     input_dim = 1
     embd_dim = 4
-    block_size = 4
+    block_size = 3
     n_layers = 1
     elegant_kqv = False
 
@@ -541,7 +541,7 @@ model = FinanceTransformer(model_config)
 model.train()
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
 vliser = Visualizer()
 
@@ -618,7 +618,7 @@ vliser.plot_preds(Y, Preds, width=16)
 
 # load the data into our program
 
-dataLoader = DataLoader(model_config, batch_size=2)
+dataLoader = DataLoader(model_config, batch_size=4)
 
 data_file = "data.txt"
 
@@ -628,60 +628,67 @@ dataLoader.load_data_from_file("data.txt", model_config.block_size)
 
 price_inputs, targets = dataLoader.restructure_data()
 
-
-epochs = 10
-
-while True:
-
-  print("START OF TRAINING -------------")
-
-  # placeholder
-  epoch = dataLoader.currentEpoch
-
-  # load batch
-  X, Y = dataLoader.load_next_batch()
-
-  # get prediction
-  preds, loss = model(X, Y)
-
-  if loss is not None:
-    # reset gradients
-    optimizer.zero_grad()
-
-    # calculate gradients from loss
-    loss.backward()
+print("START OF TRAINING -------------")
 
 
 
+epochs = 32
 
-    # update weights
-    optimizer.step()
+print(f"total: {(dataLoader.batches_per_ticker // dataLoader.batch_size)*len(dataLoader.tickerList)*epochs}")
 
-    lossi.append(loss.item())
+with tqdm(total=(dataLoader.batches_per_ticker // dataLoader.batch_size)*len(dataLoader.tickerList)*epochs, desc=f"Training progress") as pbar:
 
-    if (loss.item() < 0.01):
+  while True:
+
+    # placeholder
+    epoch = dataLoader.currentEpoch
+
+    # load batch
+    X, Y = dataLoader.load_next_batch()
+
+    # get prediction
+    preds, loss = model(X, Y)
+
+    if loss is not None:
+      # reset gradients
+      optimizer.zero_grad()
+
+      # calculate gradients from loss
+      loss.backward()
+
+      # update weights
+      optimizer.step()
+
+      lossi.append(loss.item())
+
+      # Update the progress bar
+      pbar.update(1)
+
+      if (loss.item() < 0.01):
+        break
+
+    print(f"epoch {epoch}, loss {loss}")
+
+    if (dataLoader.currentBatch == 1):
+      # this is first batch
+      first_loss = loss
+
+    if (epoch == epochs and dataLoader.check_for_next_epoch()):
+      # this is the last batch
+      last_loss = loss
+      loss_reduction = first_loss - last_loss
+
+      # prints
+      print("Pred shape after the model processed my data: ", preds.shape)
+      print(f"first loss: {first_loss}, last loss: {last_loss}")
+      print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
+      print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
+      print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
+
+      # stop training
       break
 
-  print(f"epoch {epoch}, loss {loss}")
-
-  if (dataLoader.currentBatch == 1):
-    # this is first batch
-    first_loss = loss
-
-  if (epoch == epochs and dataLoader.check_for_next_epoch()):
-    # this is the last batch
-    last_loss = loss
-    loss_reduction = first_loss - last_loss
-
-    # prints
-    print("Pred shape after the model processed my data: ", preds.shape)
-    print(f"first loss: {first_loss}, last loss: {last_loss}")
-    print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
-    # stop training
-    print("END OF TRAINING -------------")
-
-    break
-
+  print("END OF TRAINING -------------")
 
 
 # let's visualize how our model performs
@@ -710,6 +717,3 @@ print(f"losses: {lossi}")
 vliser.plot_loss(lossi)
 
 vliser.plot_preds(price_inputs, preds, width=16)
-
-
-
