@@ -385,13 +385,13 @@ data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-02-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-07-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 model.train()
 
-epochs = 6000
+epochs = 1000
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -407,29 +407,35 @@ prints = False
 
 print("----- START OF TRAINING -----")
 
-for i in range(total_batches):
+with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
-    # load batch
-    X, Y = dataLoader.next_batch()
+  for i in range(total_batches):
 
-    # get prediction
-    preds, loss = model(X, Y)
+      # load batch
+      X, Y = dataLoader.next_batch()
 
-    if loss is not None:
-      # reset gradients
-      optimizer.zero_grad()
+      # get prediction
+      preds, loss = model(X, Y)
 
-      # calculate gradients from loss
-      loss.backward()
+      if loss is not None:
+        # reset gradients
+        optimizer.zero_grad()
 
-      # update weights
-      optimizer.step()
+        # calculate gradients from loss
+        loss.backward()
 
-      losses.append(loss.item())
+        # update weights
+        optimizer.step()
 
-    if prints:
-      print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
-      print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
+        # append the loss 
+        losses.append(loss.item())
+
+        # Update the progress bar
+        pbar.update(1)
+
+      if prints:
+        print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
+        print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
 
 
 print("----- END OF TRAINING -----")
