@@ -179,203 +179,84 @@ class Visualizer():
 
 
 
-
 # dataloader class
 class DataLoader():
 
-  def __init__(self, config, batch_size):
-    self.tickerList = []
-    self.config = config
-    self.batch_size = batch_size
-    self.data_dict = {}
-
-    # used to keep track of what batch to return when load_next_batch() is called
-    self.currentTickerIndex = 0
-    self.indexWithinTicker = 0
-    self.all_price_inputs = None
-    self.all_targets = None
-    self.batches_per_ticker = 0
-    # keep track of which epoch we are in
-    self.currentEpoch = 1
-    self.currentBatch = 0
+  def __init__(self, B, T):
+    self.B = B
+    self.T = T
+    # this holds the complete training data
+    self.data = []
+    self.currentPosition = 0
+    # this is annoying but we need it to prevent input -> target mapping from 
+    # last price of one ticker to first price of next ticker
+    self.currentTicker = 0
+    self.nTickers = 0
+    # state to keep track of epochs in training
+    self.dataPerEpoch = 0
 
   # Function to normalize the prices using z-normalization
   def normalize(self, prices):
       mean_price = np.mean(prices)
       std_price = np.std(prices)
-      self.mean_price = mean_price
-      self.std_price = std_price
       normalized_prices = (prices - mean_price) / std_price
       return normalized_prices
 
   def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate):
       with open(filepath, 'w') as file:
           for ticker in tickerList:
+              # download data from Yahoo Finance
               data = yf.download(ticker, start=startDate, end=endDate)
               prices = data['Close'].values
+
+              # normalize prices of the ticker
               normalized_prices = self.normalize(prices)
 
               # popping prices if they dont modulo with my model block_size
-              pop_elements = (len(normalized_prices)-1) % self.config.block_size
-              print(f"popping {pop_elements} prices")
+              # subtracting one because inputs and targets will have len - 1 elements
+              pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
+              print(f"\npopping {pop_elements} prices from ticker {ticker} when loading data into dataloader")
               if pop_elements != 0:
                 normalized_prices = normalized_prices[:-pop_elements]
 
-              file.write(f"Ticker: {ticker}\n")
+              # write prices to file, file's purpose is for me to look at and sanity check
+              file.write(f"--- Ticker: {ticker} ---\n")
               for price in normalized_prices:
                   file.write(f"{price}\n")
-              file.write("\n")
-              self.tickerList.append(ticker)
 
-
-  def load_data_from_file(self, filepath, block_size):
-    current_ticker = None
-
-    # Open the file for reading
-    with open(filepath, 'r') as file:
-        # Read all lines
-        lines = file.readlines()
-
-        for line in lines:
-          line = line.strip()
-          if not line:
-            continue
-          if line.startswith("Ticker:"):
-            current_ticker = line.split("Ticker: ")[1]
-            self.data_dict[current_ticker] = []
-          else:
-           self.data_dict[current_ticker].append(float(line))
-
-
-  def load_next_batch(self):
-
-    # go to next ticker if next batch exceeds remaining current ticker data
-    if self.indexWithinTicker+self.batch_size > self.batches_per_ticker:
-      # if we're at the last ticker go to first ticker and increment epoch
-      if self.currentTickerIndex == (len(self.tickerList) - 1):
-        self.currentTickerIndex = 0
-        self.currentEpoch += 1
-
-      else:
-        self.currentTickerIndex += 1
-      self.indexWithinTicker = 0
-
-    # placeholders
-    outerIdx = self.currentTickerIndex
-    innerIdx = self.indexWithinTicker
+              # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
+              self.data.append(normalized_prices.tolist())
+              self.nTickers += 1
+              self.dataPerEpoch += len(normalized_prices) - 1
+            
+  def next_batch(self):
 
     # pluck out next batch
-    inputs = self.all_price_inputs[outerIdx, innerIdx:innerIdx+self.batch_size]
-    targets = self.all_targets[outerIdx, innerIdx:innerIdx+self.batch_size]
+    inp = self.data[self.currentTicker][self.currentPosition : self.currentPosition + self.B * self.T]
+    targets = self.data[self.currentTicker][self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
 
-    # update index within current ticker
-    self.indexWithinTicker = self.indexWithinTicker + self.batch_size
+    # convert to tensors and reshape, also add extra dim so shape becomes [B, T, 1]
+    inp = torch.Tensor(inp).view(self.B, self.T).unsqueeze(-1)
+    targets = torch.Tensor(targets).view(self.B, self.T).unsqueeze(-1)
 
-    # update batch tracker
-    self.currentBatch += 1
-
-    return inputs, targets
-
-  # function to load data for plotting model's predictions, this data will overlap which the load_next_batch() can't do
-  def load_data_for_plot_inference(self, ticker, amount):
-    # this function will return data prepared for model in the shape: (batch_am, block_size, 1)
-    # and data in the shape (amount) that will be plotted against model output to evaluate performance
-    block_size = self.config.block_size
-
-    assert amount % block_size == 0, f"number of data points must be divisible by block_size of {block_size}"
-
-    data = self.data_dict[ticker][:amount]
-    original_tensor = torch.tensor(data)
-
-    num_contexts = len(original_tensor) - block_size + 1
-
-    # Initialize the result tensor
-    result = []
-
-    # Create the windows
-    for i in range(num_contexts):
-        context = original_tensor[i:i+block_size].unsqueeze(1)
-        result.append(context)
-
-    # Stack the windows to create the final tensor
-    result_tensor = torch.stack(result)
-    print(f"result tensor shape {result_tensor.shape}")
-    print(f"result tensor \n{result_tensor} \n original tensor \n{original_tensor}")
-
-    return result_tensor, original_tensor
+    # update pointer
+    self.currentPosition += self.B * self.T
 
 
 
-  # function to sanity check calculations in case I forget the code in the future
-  def confirm_inputs_targets_match(self, inputs, targets):
-    # in case we have multiple tickers
-    if inputs.dim() == 4:
-      inputs_reshaped = inputs.view(inputs.shape[0], -1)
-      targets_reshaped = targets.view(targets.shape[0], -1)
-      inputs_reshaped = inputs_reshaped[:, 1:]
-      targets_reshaped = targets_reshaped[:, :-1]
+    # if next batch is out of bounds reset pointer
+    if self.currentPosition + self.B * self.T + 1 > len(self.data[self.currentTicker]):
+      self.currentPosition = 0
+      # if we are at the last ticker go to first ticker again
+      if self.currentTicker == (self.nTickers - 1):
+        self.currentTicker = 0
+      # else go to next ticker
+      else:
+        self.currentTicker += 1
+    
 
-    # in case we only have one ticker
-    else:
-      inputs_reshaped = inputs_reshaped.view(-1)
-      targets_reshaped = targets_reshaped.view(-1)
-      inputs_reshaped = inputs_reshaped[:, 1:]
-      targets_reshaped = targets_reshaped[:, :-1]
+    return inp, targets
 
-
-    return torch.equal(inputs_reshaped, targets_reshaped)
-
-
-
-  # helper function to check if next batch is in this or next epoch
-  def check_for_next_epoch(self):
-
-      if (self.indexWithinTicker+self.batch_size > self.batches_per_ticker) and (self.currentTickerIndex == (len(self.tickerList) - 1)):
-        return True
-
-      return False
-
-
-  def restructure_data(self):
-        block_size = self.config.block_size
-        price_inputs_list = []
-        targets_list = []
-
-        for ticker, prices in self.data_dict.items():
-
-            # create inputs and targets that have equal indices in their corresponding matrix
-            ticker_data_price_inputs = prices[:-1]
-            ticker_data_targets = prices[1:]
-
-            # convert them to torch.Tensors
-            ticker_data_price_inputs = torch.Tensor(ticker_data_price_inputs)
-            ticker_data_targets = torch.Tensor(ticker_data_targets)
-
-            print(f"ticker_data_price_inputs before reshape: {ticker_data_price_inputs.shape}")
-            print(f"ticker_data_targets before reshape: {ticker_data_targets.shape}")
-
-            # reshape so that each row is of length block_size
-            ticker_data_price_inputs = ticker_data_price_inputs.view(-1, block_size, 1)
-            ticker_data_targets = ticker_data_targets.view(-1, block_size, 1)
-
-            print(f"ticker_data_price_inputs after reshape: {ticker_data_price_inputs.shape}")
-            print(f"ticker_data_targets after reshape: {ticker_data_targets.shape}")
-
-            # append the price points and their targets of the current ticker to the overarching data structure
-            price_inputs_list.append(ticker_data_price_inputs)
-            targets_list.append(ticker_data_targets)
-
-        # stack the datqa from every ticker on top of each other so they become a batch dimension
-        self.all_price_inputs = torch.stack(price_inputs_list)
-        self.all_targets = torch.stack(targets_list)
-
-        # now the shape of the data will be: (number_of_tickers, block_size, 1)
-        print(f"combined_price_inputs final shape: {self.all_price_inputs.shape}")
-        print(f"combined_targets final shape: {self.all_targets.shape}")
-
-        self.batches_per_ticker = self.all_price_inputs.shape[1]
-
-        return self.all_price_inputs, self.all_targets
 
 
 # model class
@@ -394,6 +275,11 @@ class FinanceTransformer(nn.Module):
 
         # Apply custom weight initialization
         # self.apply(self.custom_weight_init)
+
+    # Method to calculate the number of parameters
+    def calculate_parameters(self):
+        total_params = sum(p.numel() for p in self.parameters())
+        return total_params
 
 
     # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
@@ -525,9 +411,9 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim = 1
-    embd_dim = 4
-    block_size = 3
-    n_layers = 1
+    embd_dim = 8
+    block_size = 8
+    n_layers = 2
     elegant_kqv = False
 
 #init
@@ -535,22 +421,31 @@ model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 
-
-
-# training loop
-model.train()
+# get the size of the model
+num_parameters = model.calculate_parameters()
+print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
 
 vliser = Visualizer()
 
 # track losses
-lossi = []
+losses = []
 
+
+# load the data into our program
+dataLoader = DataLoader(B=2, T=model_config.block_size)
+
+data_file = "data.txt"
+
+tickerList = ['MSFT']
+
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-04-01')
+
+print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 '''
-
 
 # alt training run for experiments
 
@@ -616,35 +511,23 @@ vliser.plot_preds(Y, Preds, width=16)
 
 # training run
 
-# load the data into our program
+print("----- START OF TRAINING -----")
 
-dataLoader = DataLoader(model_config, batch_size=4)
+model.train()
 
-data_file = "data.txt"
+epochs = 5
 
-dataLoader.load_data_from_yfinance(['MSFT'], data_file, startDate='2015-01-01', endDate='2015-04-01')
+batch_size = dataLoader.B * dataLoader.T
 
-dataLoader.load_data_from_file("data.txt", model_config.block_size)
+# calculate amount of batches in one epoch
+total_batches = dataLoader.dataPerEpoch*epochs // batch_size
 
-price_inputs, targets = dataLoader.restructure_data()
+print(f"total batches: {total_batches}")
 
-print("START OF TRAINING -------------")
-
-
-
-epochs = 32
-
-print(f"total: {(dataLoader.batches_per_ticker // dataLoader.batch_size)*len(dataLoader.tickerList)*epochs}")
-
-with tqdm(total=(dataLoader.batches_per_ticker // dataLoader.batch_size)*len(dataLoader.tickerList)*epochs, desc=f"Training progress") as pbar:
-
-  while True:
-
-    # placeholder
-    epoch = dataLoader.currentEpoch
+for i in range(total_batches):
 
     # load batch
-    X, Y = dataLoader.load_next_batch()
+    X, Y = dataLoader.next_batch()
 
     # get prediction
     preds, loss = model(X, Y)
@@ -659,61 +542,41 @@ with tqdm(total=(dataLoader.batches_per_ticker // dataLoader.batch_size)*len(dat
       # update weights
       optimizer.step()
 
-      lossi.append(loss.item())
+      losses.append(loss.item())
 
-      # Update the progress bar
-      pbar.update(1)
+    # prints
+    print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
+    print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
 
-      if (loss.item() < 0.01):
-        break
 
-    print(f"epoch {epoch}, loss {loss}")
-
-    if (dataLoader.currentBatch == 1):
-      # this is first batch
-      first_loss = loss
-
-    if (epoch == epochs and dataLoader.check_for_next_epoch()):
-      # this is the last batch
-      last_loss = loss
-      loss_reduction = first_loss - last_loss
-
-      # prints
-      print("Pred shape after the model processed my data: ", preds.shape)
-      print(f"first loss: {first_loss}, last loss: {last_loss}")
-      print(f"total loss reduction in {epochs} epochs: {loss_reduction}")
-      print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
-      print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
-
-      # stop training
-      break
-
-  print("END OF TRAINING -------------")
+print("----- END OF TRAINING -----")
 
 
 # let's visualize how our model performs
+model.eval()
 
-with torch.no_grad():
+print(f"losses: {losses}")
+vliser.plot_loss(losses)
 
-  price_inputs = price_inputs.squeeze(0)
 
+# plot the preds for one ticker at a time
+for i in range(len(tickerList)):
 
-  print(f"price_inputs shape before doing inference: {price_inputs.shape}")
+  # pluck out all data for current ticker
+  tickerData = dataLoader.data[i][:-1]
 
-  preds, _ = model(price_inputs)
+  print(f"tickerdata before {tickerData}")
 
-price_inputs = price_inputs.view(price_inputs.shape[0]*price_inputs.shape[1])
-preds = preds.view(preds.shape[0]*preds.shape[1])
+  # reshape to (B, T, 1) for model inference
+  tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1)
 
-print(f"price_inputs shape {price_inputs.shape}")
+  print(f"tickerdata after torchification {tickerData}")
 
-print(f"preds shape {preds.shape}")
+  with torch.no_grad():
+    tickerPreds, _ = model(tickerData)
 
-print(f"price_inputs {price_inputs}")
-print(f"preds {preds}")
-
-print(f"losses: {lossi}")
-
-vliser.plot_loss(lossi)
-
-vliser.plot_preds(price_inputs, preds, width=16)
+  # reshape to 1D for plot
+  tickerData = tickerData.view(-1)
+  tickerPreds = tickerPreds.view(-1)
+  
+  vliser.plot_preds(tickerData, tickerPreds, width=16)
