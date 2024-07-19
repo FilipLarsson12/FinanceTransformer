@@ -296,17 +296,18 @@ class FinanceTransformer(nn.Module):
                     self.hook_handles.append(backward_handle)
                 elif save_grads:
                     # special handling for capturing gradients of embedding layers
-                    embedding_handle = module.weight.register_hook(lambda grad, n=name: self.save_grad(n, grad))
-                    self.hook_handles.append(embedding_handle)
+                    emb_weight_handle = module.weight.register_hook(lambda grad, n=name: self.save_grad(n, grad, 'weight grads'))
+                    self.hook_handles.append(emb_weight_handle)
+                    if hasattr(module, 'bias') and module.bias is not None:
+                        emb_bias_handle = module.bias.register_hook(lambda grad, n=name: self.save_grad(n, grad, 'bias grads'))
+                        self.hook_handles.append(emb_bias_handle)
 
 
-    # special function to save grads for price and pos embeddings
-    def save_grad(self, name, grad):
-        print(f"Saving grad for {name}")
+    # special function to save grads for weight and bias
+    def save_grad(self, name, grad, grad_type):
         if name not in self.module_activities:
             self.module_activities[name] = {}
-        print(f"Grads for {name}: {grad}")
-        self.module_activities[name]['grads'] = grad.detach().cpu().numpy()
+        self.module_activities[name][grad_type] = grad.detach().cpu().numpy()
 
 
     # remove all the forward and backward hooks
@@ -319,16 +320,20 @@ class FinanceTransformer(nn.Module):
     # capture all module activity in the forward pass
     def save_module_activity_forward(self, module_name, module, input, output):
         weights = module.weight.detach().cpu().numpy() if hasattr(module, 'weight') else None
-        self.module_activities[module_name] = {}
-        self.module_activities[module_name]['weights'] = weights
+        bias = module.bias.detach().cpu().numpy() if hasattr(module, 'bias') and module.bias is not None else None
 
+        self.module_activities[module_name] = {}
+        self.module_activities[module_name]['input'] = input
+        self.module_activities[module_name]['weights'] = weights
+        self.module_activities[module_name]['bias'] = bias
+        self.module_activities[module_name]['output'] = output
 
     # capture all module activity in the backward pass
     def save_module_activity_backward(self, module_name, module, grad_input, grad_output=None):
-        print(f"Saving grads for {module_name}")
-        grads = module.weight.grad.detach().cpu().numpy() if hasattr(module, 'weight') and module.weight.grad is not None else None
-        print(f"Grads for {module_name}: {grads}")
-        self.module_activities[module_name]['grads'] = grads
+        weight_grads = module.weight.grad.detach().cpu().numpy() if hasattr(module, 'weight') and module.weight.grad is not None else None
+        bias_grads = module.bias.grad.detach().cpu().numpy() if hasattr(module, 'bias') and module.bias.grad is not None else None
+        self.module_activities[module_name]['weight grads'] = weight_grads
+        self.module_activities[module_name]['bias grads'] = bias_grads
 
 
     # plot all or some module
@@ -449,7 +454,11 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         loss.backward()
 
         if i == 0:
-          print(f"\nsubmodule activities: {model.module_activities}")
+          print("\nSubmodule activities:")
+          for name, activities in model.module_activities.items():
+            print(f"activities for {name}")
+            for activity, value in activities.items():
+              print(f"{activity}: {value}")
           # model.plot_module_activities()
           # removing hooks
           model.remove_hooks()
