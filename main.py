@@ -11,7 +11,11 @@ import seaborn as sns
 from tqdm import tqdm
 
 # Function to plot heatmap for weights
-def plot_heatmap(data, title, vmin=None, vmax=None):
+def plot_heatmap(data, title, vmin=-1.0, vmax=1.0):
+    # Reshape 1D data to 2D for plotting
+    if data.ndim == 1:
+        data = data.reshape(1, -1)  # Convert to a single row
+
     plt.figure(figsize=(10, 8))
     sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, vmin=vmin, vmax=vmax)
     plt.title(title)
@@ -27,6 +31,7 @@ def plot_1d(data, title):
     plt.ylabel('Weight Value')
     plt.show()
 
+
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
 
@@ -38,7 +43,7 @@ class SelfAttentionLayer(nn.Module):
         self.embd_dim = config.embd_dim
         # must make sure that we can use several attention heads
         assert config.embd_dim % config.n_head == 0, f"Embedding dimension {config.embd_dim} is not divisible by the number of heads {config.n_head}."
-        
+
         self.n_head = config.n_head
         self.embd_dim = config.embd_dim
 
@@ -118,7 +123,6 @@ class Block(nn.Module):
         x = self.ln_2(x)
         x = self.mlp(x)
         return x
-
 
 
 class Visualizer():
@@ -220,8 +224,6 @@ class DataLoader():
     # update pointer
     self.currentPosition += self.B * self.T
 
-
-
     # if next batch is out of bounds reset pointer
     if self.currentPosition + self.B * self.T + 1 > len(self.data[self.currentTicker]):
       self.currentPosition = 0
@@ -232,7 +234,6 @@ class DataLoader():
       else:
         self.currentTicker += 1
 
-
     return inp, targets
 
 
@@ -240,7 +241,7 @@ class DataLoader():
 # model class
 class FinanceTransformer(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, plot_activity=False):
         super().__init__()
         self.config = config
         assert config.block_size is not None
@@ -250,6 +251,11 @@ class FinanceTransformer(nn.Module):
         self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
         self.predictionlayer = nn.Linear(config.embd_dim, 1)
+
+        self.hook_handles = []
+
+        # so I can keep track of states in all the submodules
+        self.module_activities = {}
 
         # Apply custom weight initialization
         # self.apply(self.custom_weight_init)
@@ -278,56 +284,71 @@ class FinanceTransformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
 
-    def plot_heatmap_all_or_specific(self, plot_type='weights', module_name='all', vmin=None, vmax=None):
-        """
-        Plot heatmap for weights or gradients for all modules or a specific module.
 
-        Args:
-            plot_type (str): 'weights' to plot weights, 'grads' to plot gradients.
-            module_name (str): 'all' to plot all modules or specify the module name.
-            vmin (float): Minimum value for color bar.
-            vmax (float): Maximum value for color bar.
-        """
+    # add forward and backward hooks to all submodules
+    def register_hooks(self, save_grads=False):
         for name, module in self.named_modules():
-            if module_name != 'all' and name != module_name:
-                continue
-
-            data = None
-            if plot_type == 'weights':
-                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
-                    data = module.weight.detach().cpu().numpy()
-            elif plot_type == 'grads':
-                if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding) or isinstance(module, nn.LayerNorm):
-                    if module.weight.grad is not None:
-                        data = module.weight.grad.cpu().detach().numpy()
-
-            if data is not None:
-                if data.ndim == 2:
-                    plot_heatmap(data, f'{plot_type.capitalize()} for {name}', vmin, vmax)
-                elif data.ndim == 1:
-                    plot_1d(data, f'{plot_type.capitalize()} for {name}')
-                else:
-                    print(f"No {plot_type} data for {name} or data is not 1D/2D.")
-            else:
-                print(f"No {plot_type} data for {name}.")
-
-            if module_name != 'all':
-                break
-        else:
-            if module_name != 'all':
-                print(f"Module {module_name} not found in the model.")
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding)):
+                forward_handle = module.register_forward_hook(lambda m, i, o, n=name: self.save_module_activity_forward(n, m, i, o))
+                self.hook_handles.append(forward_handle)
+                if save_grads and module is not self.position_embeddings and module is not self.price_embeddings:
+                    backward_handle = module.register_full_backward_hook(lambda m, gi, go, n=name: self.save_module_activity_backward(n, m, gi, go))
+                    self.hook_handles.append(backward_handle)
+                elif save_grads:
+                    # special handling for capturing gradients of embedding layers
+                    embedding_handle = module.weight.register_hook(lambda grad, n=name: self.save_grad(n, grad))
+                    self.hook_handles.append(embedding_handle)
 
 
-    def forward(self, x, targets=None):
-        _, T, _ = x.size()
+    # special function to save grads for price and pos embeddings
+    def save_grad(self, name, grad):
+        print(f"Saving grad for {name}")
+        if name not in self.module_activities:
+            self.module_activities[name] = {}
+        print(f"Grads for {name}: {grad}")
+        self.module_activities[name]['grads'] = grad.detach().cpu().numpy()
+
+
+    # remove all the forward and backward hooks
+    def remove_hooks(self):
+        for handle in self.hook_handles:
+            handle.remove()
+        self.hook_handles = []
+
+
+    # capture all module activity in the forward pass
+    def save_module_activity_forward(self, module_name, module, input, output):
+        weights = module.weight.detach().cpu().numpy() if hasattr(module, 'weight') else None
+        self.module_activities[module_name] = {}
+        self.module_activities[module_name]['weights'] = weights
+
+
+    # capture all module activity in the backward pass
+    def save_module_activity_backward(self, module_name, module, grad_input, grad_output=None):
+        print(f"Saving grads for {module_name}")
+        grads = module.weight.grad.detach().cpu().numpy() if hasattr(module, 'weight') and module.weight.grad is not None else None
+        print(f"Grads for {module_name}: {grads}")
+        self.module_activities[module_name]['grads'] = grads
+
+
+    # plot all or some module
+    def plot_module_activities(self):
+      for module_name, activity in self.module_activities.items():
+        print(f"Module: {module_name}")
+        for key, data in activity.items():
+          plot_heatmap(data, f"{key} for {module_name}")
+
+
+    def forward(self, idx, targets=None):
+        _, T, _ = idx.size()
 
         assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
 
         # input dim is: (batch_am, block_size, 1)
 
-        pos = torch.arange(0, T, dtype=torch.long) # shape (T)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
         pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
-        price_emb = self.price_embeddings(x) # price embeddings of shape (B, T, embd_dim)
+        price_emb = self.price_embeddings(idx) # price embeddings of shape (B, T, embd_dim)
 
         # adding positional embeddings to the price embeddings
         x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)
@@ -352,11 +373,11 @@ class FinanceTransformer(nn.Module):
 # model config class
 @dataclass
 class ModelConfig():
-    input_dim = 1
-    embd_dim = 6
-    block_size = 6
-    n_layers = 1
-    n_head = 2
+    input_dim: int = 1
+    embd_dim: int = 3
+    block_size: int = 4
+    n_layers: int = 0
+    n_head: int = 1
 
 # ----------------------------------------------------------------------------------------
 
@@ -370,7 +391,7 @@ num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
 
 vliser = Visualizer()
 
@@ -379,19 +400,19 @@ losses = []
 
 
 # load the data into our program
-dataLoader = DataLoader(B=2, T=model_config.block_size)
+dataLoader = DataLoader(B=4, T=model_config.block_size)
 
 data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-07-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-04-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 model.train()
 
-epochs = 1000
+epochs = 5
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -403,9 +424,12 @@ print(f"total batches: {total_batches}")
 # turn on/off prints
 prints = False
 
+# register hooks so model can save state during forward and backward pass
+model.register_hooks(save_grads=True)
+
 # training run
 
-print("----- START OF TRAINING -----")
+print("\n----- START OF TRAINING -----")
 
 with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
@@ -424,10 +448,16 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
+        if i == 0:
+          print(f"\nsubmodule activities: {model.module_activities}")
+          # model.plot_module_activities()
+          # removing hooks
+          model.remove_hooks()
+
         # update weights
         optimizer.step()
 
-        # append the loss 
+        # append the loss
         losses.append(loss.item())
 
         # Update the progress bar
@@ -437,8 +467,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
         print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
 
-
-print("----- END OF TRAINING -----")
+print("----- END OF TRAINING -----\n")
 
 
 # let's visualize how our model performs
@@ -463,7 +492,6 @@ for i in range(len(tickerList)):
 
   with torch.no_grad():
     tickerPreds, _ = model(tickerData)
-
 
   # pluck out real targets
   tickerTargets = dataLoader.data[i][1:]
