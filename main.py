@@ -22,7 +22,7 @@ def plot_heatmap(ax, data, module, module_name, activity):
         data = data.reshape(-1, data.shape[-1])
         print(f"Reshaped data from 3D to 2D: {data.shape}")
         # special handling for output and grad output matrix for better visualization
-    if (activity == "output" or activity == "grad output") and not isinstance(module, nn.LayerNorm):
+    if (activity == "output" or activity == "grad output") and (not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding)):
         data = data.T
     # if 2D data is small enough print the weight values in the plot as well
     if data.shape[0] < 10 and data.shape[1] < 10:
