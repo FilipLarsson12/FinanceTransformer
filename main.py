@@ -19,10 +19,14 @@ def plot_heatmap(ax, data, title):
         data = data.reshape(1, -1)  # Convert to a single row
         print(f"Reshaped data to 2D (1 row): {data.shape}")
     elif data.ndim == 3:
-        data = data.view(-1, data.shape[-1])  # Convert to a single row
+        data = data.reshape(-1, data.shape[-1])
         print(f"Reshaped data from 3D to 2D: {data.shape}")
+    # if 2D data is small enough print the weight values in the plot as well 
+    if data.shape[0] < 10 and data.shape[1] < 10:
+      sns.heatmap(data, annot=True, fmt=".3f", cmap='coolwarm', cbar=True, center=0, ax=ax)
+    else:
+      sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, ax=ax)
 
-    sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, ax=ax)
     ax.set_title(title)
     ax.set_xlabel('Weight Matrix Columns')
     ax.set_ylabel('Weight Matrix Rows')
@@ -321,8 +325,12 @@ class FinanceTransformer(nn.Module):
 
         weights = module.weight.detach() if hasattr(module, 'weight') else None
         bias = module.bias.detach() if hasattr(module, 'bias') and module.bias is not None else None
+         # input is a tuple so have to extract tensor
+        input = input[0]
+        input = input.detach()
+        output = output.detach()
         self.module_activities[module_name] = {}
-        self.module_activities[module_name]['input'] = input[0] # input is a tuple so have to extract tensor
+        self.module_activities[module_name]['input'] = input
         # only add weights and bias if they are not None
         if weights is not None:
           self.module_activities[module_name]['weights'] = weights
@@ -361,8 +369,8 @@ class FinanceTransformer(nn.Module):
             forward_keys = ['input', 'weights', 'bias', 'output']
             backward_keys = ['grad input', 'grad output', 'weight grads', 'bias grads']
 
-            forward_activities = {k: v for k, v in module_activity.items()}
-            backward_activities = {k: v for k, v in module_activity.items()}
+            forward_activities = {k: v for k, v in module_activity.items() if k in forward_keys and v is not None}
+            backward_activities = {k: v for k, v in module_activity.items() if k in backward_keys and v is not None}
 
             n_forward_activities = len(forward_activities)
             n_backward_activities = len(backward_activities)
@@ -379,7 +387,6 @@ class FinanceTransformer(nn.Module):
                 for i, (key, data) in enumerate(forward_activities.items()):
                     print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
                     if data is not None:
-                        data = data.numpy()  # Detach the tensor before converting to NumPy
                         plot_heatmap(axes[0, i], data, f'{key} for {module_name}')
                     else:
                         print("Data is None")
@@ -392,7 +399,6 @@ class FinanceTransformer(nn.Module):
                 for i, (key, data) in enumerate(backward_activities.items()):
                     print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
                     if data is not None:
-                        data = data.numpy()  # Detach the tensor before converting to NumPy
                         plot_heatmap(axes[1, i], data, f'{key} for {module_name}')
                     else:
                         print("Data is None")
@@ -516,13 +522,13 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
-        if i == 0:
+        if i == 1:
           print("\nSubmodule activities:")
           for name, activities in model.module_activities.items():
             print(f"activities for {name}")
             for activity, value in activities.items():
               print(f"{activity}: {value.shape}")
-          # model.plot_module_activities()
+          model.plot_module_activities()
           # removing hooks
           model.remove_hooks()
 
