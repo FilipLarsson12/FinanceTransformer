@@ -11,23 +11,26 @@ import seaborn as sns
 from tqdm import tqdm
 
 # Function to plot heatmap for weights
-def plot_heatmap(ax, data, title):
-    print(f"Plotting heatmap: {title}")
+def plot_heatmap(ax, data, module, module_name, activity):
+    print(f"Plotting heatmap: {activity} for {module_name}")
     print(f"Original data shape: {data.shape}")
     # Ensure data is 2D for plotting
     if data.ndim == 1:
-        data = data.reshape(1, -1)  # Convert to a single row
+        data = data.reshape(-1, 1)  # Convert to a single row
         print(f"Reshaped data to 2D (1 row): {data.shape}")
     elif data.ndim == 3:
         data = data.reshape(-1, data.shape[-1])
         print(f"Reshaped data from 3D to 2D: {data.shape}")
-    # if 2D data is small enough print the weight values in the plot as well 
+        # special handling for output and grad output matrix for better visualization
+    if (activity == "output" or activity == "grad output") and not isinstance(module, nn.LayerNorm):
+        data = data.T
+    # if 2D data is small enough print the weight values in the plot as well
     if data.shape[0] < 10 and data.shape[1] < 10:
       sns.heatmap(data, annot=True, fmt=".3f", cmap='coolwarm', cbar=True, center=0, ax=ax)
     else:
       sns.heatmap(data, annot=False, cmap='coolwarm', cbar=True, center=0, ax=ax)
 
-    ax.set_title(title)
+    ax.set_title(f"{activity} for {module_name}")
     ax.set_xlabel('Weight Matrix Columns')
     ax.set_ylabel('Weight Matrix Rows')
 
@@ -299,17 +302,18 @@ class FinanceTransformer(nn.Module):
 
                     # special handling for price and pos embeddings
                     else:
-                        backward_handle = module.weight.register_hook(lambda grad, n=name: self.save_grad(n, grad, 'weight grads'))
+                        backward_handle = module.weight.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'weight grads'))
                         self.hook_handles.append(backward_handle)
                         if hasattr(module, 'bias') and module.bias is not None:
-                            emb_bias_handle = module.bias.register_hook(lambda grad, n=name: self.save_grad(n, grad, 'bias grads'))
+                            emb_bias_handle = module.bias.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'bias grads'))
                             self.hook_handles.append(emb_bias_handle)     
 
 
     # special function to save grads for weight and bias for price and pos embeddings
-    def save_grad(self, name, grad, grad_type):
+    def save_grad(self, module, name, grad, grad_type):
         if name not in self.module_activities:
             self.module_activities[name] = {}
+        self.module_activities[name]['module'] = module  # Save the module object
         self.module_activities[name][grad_type] = grad.detach()
 
 
@@ -330,6 +334,7 @@ class FinanceTransformer(nn.Module):
         input = input.detach()
         output = output.detach()
         self.module_activities[module_name] = {}
+        self.module_activities[module_name]['module'] = module  # Save the module object
         self.module_activities[module_name]['input'] = input
         # only add weights and bias if they are not None
         if weights is not None:
@@ -366,6 +371,9 @@ class FinanceTransformer(nn.Module):
         for module_name, module_activity in self.module_activities.items():
             print(f"Plotting module activity for {module_name}")
 
+            module = module_activity.pop('module', None)
+
+
             forward_keys = ['input', 'weights', 'bias', 'output']
             backward_keys = ['grad input', 'grad output', 'weight grads', 'bias grads']
 
@@ -387,7 +395,7 @@ class FinanceTransformer(nn.Module):
                 for i, (key, data) in enumerate(forward_activities.items()):
                     print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
                     if data is not None:
-                        plot_heatmap(axes[0, i], data, f'{key} for {module_name}')
+                        plot_heatmap(axes[0, i], data, module, module_name, key)  # Pass module to plot_heatmap
                     else:
                         print("Data is None")
                 for i in range(n_forward_activities, plot_width):
@@ -399,7 +407,7 @@ class FinanceTransformer(nn.Module):
                 for i, (key, data) in enumerate(backward_activities.items()):
                     print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
                     if data is not None:
-                        plot_heatmap(axes[1, i], data, f'{key} for {module_name}')
+                        plot_heatmap(axes[1, i], data, module, module_name, key)  # Pass module to plot_heatmap
                     else:
                         print("Data is None")
                 for i in range(n_backward_activities, plot_width):
@@ -527,7 +535,8 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
           for name, activities in model.module_activities.items():
             print(f"activities for {name}")
             for activity, value in activities.items():
-              print(f"{activity}: {value.shape}")
+              if activity != 'module':
+                print(f"{activity}: {value.shape}")
           model.plot_module_activities()
           # removing hooks
           model.remove_hooks()
