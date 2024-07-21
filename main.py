@@ -13,6 +13,7 @@ from tqdm import tqdm
 # Function to plot heatmap for weights
 def plot_heatmap(ax, data, module, module_name, activity):
     print(f"Plotting heatmap: {activity} for {module_name}")
+    print(f"module name is {module_name}")
     print(f"Original data shape: {data.shape}")
     # Ensure data is 2D for plotting
     if data.ndim == 1:
@@ -22,7 +23,7 @@ def plot_heatmap(ax, data, module, module_name, activity):
         data = data.reshape(-1, data.shape[-1])
         print(f"Reshaped data from 3D to 2D: {data.shape}")
         # special handling for output and grad output matrix for better visualization
-    if (activity == "output" or activity == "grad output") and ((not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding)) or module_name == "predictionlayer"):
+    if (activity == "output" or activity == "grad output") and ((not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding)) and module_name != "predictionlayer"):
         data = data.T
     # if 2D data is small enough print the weight values in the plot as well
     if data.shape[0] < 10 and data.shape[1] < 10:
@@ -163,6 +164,58 @@ class Visualizer():
       plt.legend()
       plt.show()
 
+  
+    # function that accesses the module_activities dict of a model and plots submodule activities
+    def plot_module_activities(self, model):
+        for module_name, module_activity in model.module_activities.items():
+            print(f"Plotting module activity for {module_name}")
+
+            module = module_activity.pop('module', None)
+
+
+            forward_keys = ['input', 'weights', 'bias', 'output']
+            backward_keys = ['grad input', 'grad output', 'weight grads', 'bias grads']
+
+            forward_activities = {k: v for k, v in module_activity.items() if k in forward_keys and v is not None}
+            backward_activities = {k: v for k, v in module_activity.items() if k in backward_keys and v is not None}
+
+            n_forward_activities = len(forward_activities)
+            n_backward_activities = len(backward_activities)
+
+            print(f"Number of forward activities: {n_forward_activities}")
+            print(f"Number of backward activities: {n_backward_activities}")
+
+            plot_width = max(n_forward_activities, n_backward_activities)
+
+            fig, axes = plt.subplots(2, plot_width, figsize=(5 * plot_width, 10))
+
+            if n_forward_activities > 0:
+                # Plot forward activities
+                for i, (key, data) in enumerate(forward_activities.items()):
+                    print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
+                    if data is not None:
+                        plot_heatmap(axes[0, i], data, module, module_name, key)  # Pass module to plot_heatmap
+                    else:
+                        print("Data is None")
+                for i in range(n_forward_activities, plot_width):
+                    # Hide the subplot
+                    axes[0, i].set_visible(False)
+
+            if n_backward_activities > 0:
+                # Plot backward activities
+                for i, (key, data) in enumerate(backward_activities.items()):
+                    print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
+                    if data is not None:
+                        plot_heatmap(axes[1, i], data, module, module_name, key)  # Pass module to plot_heatmap
+                    else:
+                        print("Data is None")
+                for i in range(n_backward_activities, plot_width):
+                    # Hide the subplot
+                    axes[1, i].set_visible(False)
+
+            plt.tight_layout()
+            plt.show()
+
 
 
 # dataloader class
@@ -290,23 +343,25 @@ class FinanceTransformer(nn.Module):
 
 
     # add forward and backward hooks to all submodules
-    def register_hooks(self, save_grads=False):
+    def register_hooks(self, save_grads=False, only_save_modules=None):
         for name, module in self.named_modules():
-            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding)):
-                forward_handle = module.register_forward_hook(lambda m, i, o, n=name: self.save_module_activity_forward(n, m, i, o))
-                self.hook_handles.append(forward_handle)
-                if save_grads:
-                    if module is not self.position_embeddings and module is not self.price_embeddings:
-                        backward_handle = module.register_full_backward_hook(lambda m, gi, go, n=name: self.save_module_activity_backward(n, m, gi, go))
-                        self.hook_handles.append(backward_handle)
+            # if only_save_modules is None we save activities for all modules else we only save for modules in only_save_modules-list
+            if only_save_modules is None or name in only_save_modules:
+                if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding)):
+                    forward_handle = module.register_forward_hook(lambda m, i, o, n=name: self.save_module_activity_forward(n, m, i, o))
+                    self.hook_handles.append(forward_handle)
+                    if save_grads:
+                        if module is not self.position_embeddings and module is not self.price_embeddings:
+                            backward_handle = module.register_full_backward_hook(lambda m, gi, go, n=name: self.save_module_activity_backward(n, m, gi, go))
+                            self.hook_handles.append(backward_handle)
 
-                    # special handling for price and pos embeddings
-                    else:
-                        backward_handle = module.weight.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'weight grads'))
-                        self.hook_handles.append(backward_handle)
-                        if hasattr(module, 'bias') and module.bias is not None:
-                            emb_bias_handle = module.bias.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'bias grads'))
-                            self.hook_handles.append(emb_bias_handle)     
+                        # special handling for price and pos embeddings
+                        else:
+                            backward_handle = module.weight.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'weight grads'))
+                            self.hook_handles.append(backward_handle)
+                            if hasattr(module, 'bias') and module.bias is not None:
+                                emb_bias_handle = module.bias.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'bias grads'))
+                                self.hook_handles.append(emb_bias_handle)     
 
 
     # special function to save grads for weight and bias for price and pos embeddings
@@ -367,57 +422,6 @@ class FinanceTransformer(nn.Module):
           self.module_activities[module_name]['grad output'] = grad_output
 
 
-    def plot_module_activities(self):
-        for module_name, module_activity in self.module_activities.items():
-            print(f"Plotting module activity for {module_name}")
-
-            module = module_activity.pop('module', None)
-
-
-            forward_keys = ['input', 'weights', 'bias', 'output']
-            backward_keys = ['grad input', 'grad output', 'weight grads', 'bias grads']
-
-            forward_activities = {k: v for k, v in module_activity.items() if k in forward_keys and v is not None}
-            backward_activities = {k: v for k, v in module_activity.items() if k in backward_keys and v is not None}
-
-            n_forward_activities = len(forward_activities)
-            n_backward_activities = len(backward_activities)
-
-            print(f"Number of forward activities: {n_forward_activities}")
-            print(f"Number of backward activities: {n_backward_activities}")
-
-            plot_width = max(n_forward_activities, n_backward_activities)
-
-            fig, axes = plt.subplots(2, plot_width, figsize=(5 * plot_width, 10))
-
-            if n_forward_activities > 0:
-                # Plot forward activities
-                for i, (key, data) in enumerate(forward_activities.items()):
-                    print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
-                    if data is not None:
-                        plot_heatmap(axes[0, i], data, module, module_name, key)  # Pass module to plot_heatmap
-                    else:
-                        print("Data is None")
-                for i in range(n_forward_activities, plot_width):
-                    # Hide the subplot
-                    axes[0, i].set_visible(False)
-
-            if n_backward_activities > 0:
-                # Plot backward activities
-                for i, (key, data) in enumerate(backward_activities.items()):
-                    print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
-                    if data is not None:
-                        plot_heatmap(axes[1, i], data, module, module_name, key)  # Pass module to plot_heatmap
-                    else:
-                        print("Data is None")
-                for i in range(n_backward_activities, plot_width):
-                    # Hide the subplot
-                    axes[1, i].set_visible(False)
-
-            plt.tight_layout()
-            plt.show()
-
-
     def forward(self, idx, targets=None):
         _, T, _ = idx.size()
 
@@ -429,8 +433,6 @@ class FinanceTransformer(nn.Module):
         pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
         price_emb = self.price_embeddings(idx) # price embeddings of shape (B, T, embd_dim)
 
-        print(f"Price embeddings shape: {price_emb.shape}")
-
         # adding positional embeddings to the price embeddings
         x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)
 
@@ -440,7 +442,7 @@ class FinanceTransformer(nn.Module):
         x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
 
         if targets is not None:
-            # now we get predictions at every position in the sequence in every batch
+            # now we get predictions at every position in the sequence in every batch 
             preds = self.predictionlayer(x) # (batch_am, block_size, 1)
             loss_fn = nn.MSELoss()
             loss = loss_fn(preds, targets)
@@ -505,7 +507,7 @@ print(f"total batches: {total_batches}")
 prints = False
 
 # register hooks so model can save state during forward and backward pass
-model.register_hooks(save_grads=True)
+model.register_hooks(save_grads=True, only_save_modules=["layers.0.attn.calc_k", "predictionlayer"])
 
 print(f"Model config: {model_config}")
 
@@ -530,14 +532,14 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
-        if i == 1:
+        if i < 2:
           print("\nSubmodule activities:")
           for name, activities in model.module_activities.items():
             print(f"activities for {name}")
             for activity, value in activities.items():
               if activity != 'module':
                 print(f"{activity}: {value.shape}")
-          model.plot_module_activities()
+          vliser.plot_module_activities(model)
           # removing hooks
           model.remove_hooks()
 
