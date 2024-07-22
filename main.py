@@ -12,16 +12,11 @@ from tqdm import tqdm
 
 # Function to plot heatmap for weights
 def plot_heatmap(ax, data, module, module_name, activity):
-    print(f"Plotting heatmap: {activity} for {module_name}")
-    print(f"module name is {module_name}")
-    print(f"Original data shape: {data.shape}")
     # Ensure data is 2D for plotting
     if data.ndim == 1:
         data = data.reshape(-1, 1)  # Convert to a single row
-        print(f"Reshaped data to 2D (1 row): {data.shape}")          
     elif data.ndim == 3:
         data = data.reshape(-1, data.shape[-1])
-        print(f"Reshaped data from 3D to 2D: {data.shape}")
         # special handling for output and grad output matrix for better visualization
     if (activity == "output" or activity == "grad output") and ((not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding)) and module_name != "predictionlayer"):
         data = data.T
@@ -132,6 +127,7 @@ class Block(nn.Module):
 
 class Visualizer():
 
+
     def plot_preds(self, actual_prices, preds, width=10):
         actual_prices = np.array(actual_prices)
         preds = np.array(preds)
@@ -164,7 +160,7 @@ class Visualizer():
       plt.legend()
       plt.show()
 
-  
+
     # function that accesses the module_activities dict of a model and plots submodule activities
     def plot_module_activities(self, model):
         for module_name, module_activity in model.module_activities.items():
@@ -182,8 +178,8 @@ class Visualizer():
             n_forward_activities = len(forward_activities)
             n_backward_activities = len(backward_activities)
 
-            print(f"Number of forward activities: {n_forward_activities}")
-            print(f"Number of backward activities: {n_backward_activities}")
+            #print(f"Number of forward activities: {n_forward_activities}")
+            #print(f"Number of backward activities: {n_backward_activities}")
 
             plot_width = max(n_forward_activities, n_backward_activities)
 
@@ -192,7 +188,7 @@ class Visualizer():
             if n_forward_activities > 0:
                 # Plot forward activities
                 for i, (key, data) in enumerate(forward_activities.items()):
-                    print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
+                    # print(f"Plotting forward activity {i+1}/{n_forward_activities}: {key}")
                     if data is not None:
                         plot_heatmap(axes[0, i], data, module, module_name, key)  # Pass module to plot_heatmap
                     else:
@@ -204,7 +200,7 @@ class Visualizer():
             if n_backward_activities > 0:
                 # Plot backward activities
                 for i, (key, data) in enumerate(backward_activities.items()):
-                    print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
+                    # print(f"Plotting backward activity {i+1}/{n_backward_activities}: {key}")
                     if data is not None:
                         plot_heatmap(axes[1, i], data, module, module_name, key)  # Pass module to plot_heatmap
                     else:
@@ -361,7 +357,7 @@ class FinanceTransformer(nn.Module):
                             self.hook_handles.append(backward_handle)
                             if hasattr(module, 'bias') and module.bias is not None:
                                 emb_bias_handle = module.bias.register_hook(lambda grad, m=module, n=name: self.save_grad(m, n, grad, 'bias grads'))
-                                self.hook_handles.append(emb_bias_handle)     
+                                self.hook_handles.append(emb_bias_handle)
 
 
     # special function to save grads for weight and bias for price and pos embeddings
@@ -407,11 +403,10 @@ class FinanceTransformer(nn.Module):
         # grad_input and grad_output is a tuple so have to extract tensor
         grad_input = grad_input[0]
         grad_output = grad_output[0]
-        print(f"grad input type for {module_name}: {type(grad_input)}")
         grad_input = grad_input.detach() if grad_input is not None else None
         grad_output = grad_output.detach() if grad_output is not None else None
-        
-        # add to activity dict 
+
+        # add to activity dict
         if grad_input is not None:
           self.module_activities[module_name]['grad input'] = grad_input
         if weight_grads is not None:
@@ -442,7 +437,7 @@ class FinanceTransformer(nn.Module):
         x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
 
         if targets is not None:
-            # now we get predictions at every position in the sequence in every batch 
+            # now we get predictions at every position in the sequence in every batch
             preds = self.predictionlayer(x) # (batch_am, block_size, 1)
             loss_fn = nn.MSELoss()
             loss = loss_fn(preds, targets)
@@ -474,7 +469,7 @@ num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 vliser = Visualizer()
 
@@ -488,13 +483,13 @@ data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-04-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-03-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 model.train()
 
-epochs = 5
+epochs = 200
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -507,7 +502,7 @@ print(f"total batches: {total_batches}")
 prints = False
 
 # register hooks so model can save state during forward and backward pass
-model.register_hooks(save_grads=True, only_save_modules=["layers.0.attn.calc_k", "predictionlayer"])
+model.register_hooks(save_grads=True)
 
 print(f"Model config: {model_config}")
 
@@ -532,7 +527,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
-        if i < 2:
+        if i == (total_batches-1):
           print("\nSubmodule activities:")
           for name, activities in model.module_activities.items():
             print(f"activities for {name}")
