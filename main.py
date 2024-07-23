@@ -18,7 +18,7 @@ def plot_heatmap(ax, data, module, module_name, activity):
     elif data.ndim == 3:
         data = data.reshape(-1, data.shape[-1])
         # special handling for output and grad output matrix for better visualization
-    if (activity == "output" or activity == "grad output") and ((not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding)) and module_name != "predictionlayer"):
+    if (activity == "output" or activity == "grad output") and ((not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.Embedding) and not isinstance(module, nn.GELU)) and module_name != "predictionlayer"):
         data = data.T
     # if 2D data is small enough print the weight values in the plot as well
     if data.shape[0] < 10 and data.shape[1] < 10:
@@ -96,12 +96,13 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.proj_1 = nn.Linear(config.embd_dim, 4 * config.embd_dim)
-        self.gelu = nn.GELU(approximate='tanh')
+        self.act_fn = nn.GELU(approximate='tanh') # Loss = 1.01 after 500 epochs
+        #self.act_fn = nn.LeakyReLU() # Loss = 0.16 after 500 epochs
         self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
 
     def forward(self, x):
         x = self.proj_1(x)
-        x = self.gelu(x)
+        x = self.act_fn(x)
         x = self.proj_2(x)
         return x
 
@@ -143,7 +144,7 @@ class Visualizer():
         plt.plot(x_values, preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
         plt.title('Stock Price Plot')
-        plt.xlabel('Time')
+        plt.xlabel('Day')
         plt.ylabel('Price')
         plt.grid(True)
         plt.legend()  # Add a legend to the plot
@@ -343,7 +344,7 @@ class FinanceTransformer(nn.Module):
         for name, module in self.named_modules():
             # if only_save_modules is None we save activities for all modules else we only save for modules in only_save_modules-list
             if only_save_modules is None or name in only_save_modules:
-                if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding)):
+                if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, nn.GELU, nn.LeakyReLU)):
                     forward_handle = module.register_forward_hook(lambda m, i, o, n=name: self.save_module_activity_forward(n, m, i, o))
                     self.hook_handles.append(forward_handle)
                     if save_grads:
@@ -453,23 +454,29 @@ class FinanceTransformer(nn.Module):
 class ModelConfig():
     input_dim: int = 1
     embd_dim: int = 4
-    block_size: int = 3
+    block_size: int = 6
     n_layers: int = 1
     n_head: int = 1
 
 # ----------------------------------------------------------------------------------------
 
+# autodetect device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
 #init
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
+model.to(device)
 
 # get the size of the model
 num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
 
 vliser = Visualizer()
 
@@ -477,19 +484,19 @@ vliser = Visualizer()
 losses = []
 
 # load the data into our program
-dataLoader = DataLoader(B=2, T=model_config.block_size)
+dataLoader = DataLoader(B=4, T=model_config.block_size)
 
 data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-03-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-06-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 model.train()
 
-epochs = 200
+epochs = 2000
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -498,8 +505,9 @@ total_batches = dataLoader.dataPerEpoch*epochs // batch_size
 
 print(f"total batches: {total_batches}")
 
-# turn on/off prints
+# toggle prints and plots
 prints = False
+plots = False
 
 # register hooks so model can save state during forward and backward pass
 model.register_hooks(save_grads=True)
@@ -517,6 +525,10 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
       # load batch
       X, Y = dataLoader.next_batch()
 
+      # move batch to correct device
+      X = X.to(device)
+      Y = Y.to(device)
+
       # get prediction
       preds, loss = model(X, Y)
 
@@ -527,7 +539,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
-        if i == (total_batches-1):
+        if i == (total_batches-1) and plots:
           print("\nSubmodule activities:")
           for name, activities in model.module_activities.items():
             print(f"activities for {name}")
@@ -569,7 +581,7 @@ for i in range(len(tickerList)):
   print(f"tickerdata before {tickerData}")
 
   # reshape to (B, T, 1) for model inference
-  tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1)
+  tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
 
   print(f"tickerdata after torchification {tickerData}")
 
@@ -580,7 +592,7 @@ for i in range(len(tickerList)):
   tickerTargets = dataLoader.data[i][1:]
 
   # reshape to 1D for plot
-  tickerPreds = tickerPreds.view(-1)
+  tickerPreds = tickerPreds.view(-1).cpu()
 
   vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, width=16)
 
