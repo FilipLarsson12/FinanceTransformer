@@ -151,13 +151,12 @@ class Visualizer():
         plt.show()
 
 
-    def plot_loss(self, lossi):
+    def plot_graph(self, list, title, xlabel, ylabel):
 
       # Plot the loss
-      plt.plot(lossi, label='Training Loss')
-      plt.xlabel('Iteration')
-      plt.ylabel('Loss')
-      plt.title('Training Loss over Iterations')
+      plt.plot(list, label=title)
+      plt.xlabel(xlabel)
+      plt.ylabel(ylabel)
       plt.legend()
       plt.show()
 
@@ -236,6 +235,7 @@ class DataLoader():
       mean_price = np.mean(prices)
       std_price = np.std(prices)
       normalized_prices = (prices - mean_price) / std_price
+      # normalized_prices = normalized_prices*10 # Loss = 0.459
       return normalized_prices
 
   def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate):
@@ -417,6 +417,37 @@ class FinanceTransformer(nn.Module):
         if grad_input is not None:
           self.module_activities[module_name]['grad output'] = grad_output
 
+    # method that returns a dictionary with module and avg grad for it's weight and bias
+    def get_network_grads(self, pooling="avg"):
+      network_grads = {}
+      # loop through the submodules
+      for module_name, activities in self.module_activities.items():
+        if 'weight grads' in activities:
+
+          # init empty dict for current submodule
+          network_grads[module_name] = {}
+
+          # fill it with avg grads for weight and bias
+          weight_grads = activities['weight grads']
+
+          if pooling == "avg":
+            weight_grads_avg = weight_grads.mean()
+            network_grads[module_name]["weight grads avg"] = weight_grads_avg
+
+        if 'bias grads' in activities:
+
+          # init empty dict for current submodule
+          network_grads[module_name] = {}
+
+          # fill it with avg grads for weight and bias
+          bias_grads = activities['bias grads']
+
+          if pooling == "avg":
+            bias_grads_avg = bias_grads.mean()
+            network_grads[module_name]["bias grads avg"] = bias_grads_avg
+
+      return network_grads
+
 
     def forward(self, idx, targets=None):
         _, T, _ = idx.size()
@@ -453,10 +484,10 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    embd_dim: int = 4
-    block_size: int = 6
-    n_layers: int = 1
-    n_head: int = 1
+    embd_dim: int = 16
+    block_size: int = 16
+    n_layers: int = 4
+    n_head: int = 2
 
 # ----------------------------------------------------------------------------------------
 
@@ -476,7 +507,7 @@ num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 vliser = Visualizer()
 
@@ -490,13 +521,13 @@ data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-06-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-11-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
 model.train()
 
-epochs = 2000
+epochs = 400
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -539,17 +570,6 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
-        if i == (total_batches-1) and plots:
-          print("\nSubmodule activities:")
-          for name, activities in model.module_activities.items():
-            print(f"activities for {name}")
-            for activity, value in activities.items():
-              if activity != 'module':
-                print(f"{activity}: {value.shape}")
-          vliser.plot_module_activities(model)
-          # removing hooks
-          model.remove_hooks()
-
         # update weights
         optimizer.step()
 
@@ -559,17 +579,55 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # Update the progress bar
         pbar.update(1)
 
+      # eval during training
+      # plot the preds for one ticker at a time
+      if i == (total_batches-1):
+        vliser.plot_module_activities(model)
+
+        network_grads = model.get_network_grads()
+        print(network_grads)
+        for module, grads in network_grads.items():
+          print(f"Avg Grads for module: {module}:")
+          for gradname, gradvalue in grads.items():
+            print(f"{gradname}: {gradvalue}")
+
+        for i in range(len(tickerList)):
+
+          # pluck out all data for current ticker
+          tickerData = dataLoader.data[i][:-1]
+
+          print(f"tickerdata before {tickerData}")
+
+          # reshape to (B, T, 1) for model inference
+          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
+
+          with torch.no_grad():
+            tickerPreds, _ = model(tickerData)
+
+          # pluck out real targets
+          tickerTargets = dataLoader.data[i][1:]
+
+          # reshape to 1D for plot
+          tickerPreds = tickerPreds.view(-1).cpu()
+
+          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, width=16)
+
+
+
       if prints:
         print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
         print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
 
 print("----- END OF TRAINING -----\n")
 
+model.remove_hooks()
+
+
 # let's visualize how our model performs
 model.eval()
 
 print(f"losses: {losses}")
-vliser.plot_loss(losses)
+vliser.plot_graph(losses, "training loss", "iteration", "loss")
 
 
 # plot the preds for one ticker at a time
@@ -582,8 +640,6 @@ for i in range(len(tickerList)):
 
   # reshape to (B, T, 1) for model inference
   tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-
-  print(f"tickerdata after torchification {tickerData}")
 
   with torch.no_grad():
     tickerPreds, _ = model(tickerData)
