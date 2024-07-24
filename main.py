@@ -54,6 +54,9 @@ class SelfAttentionLayer(nn.Module):
 
         # final proj before return
         self.proj = nn.Linear(config.embd_dim, config.embd_dim)
+        # flag for weight scaling to counteract residual streams increasing variance in the forward pass 
+        self.proj.RESIDUAL_SCALING_INIT = 1
+        
         # register parameter for the lower triangular mask-matrix
         self.register_buffer("bias",
         torch.tril(torch.ones(config.block_size, config.block_size))
@@ -99,6 +102,8 @@ class MLP(nn.Module):
         self.act_fn = nn.GELU(approximate='tanh') # Loss = 1.01 after 500 epochs
         #self.act_fn = nn.LeakyReLU() # Loss = 0.16 after 500 epochs
         self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
+        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
+        self.proj_2.RESIDUAL_SCALING_INIT = 1
 
     def forward(self, x):
         x = self.proj_1(x)
@@ -149,7 +154,7 @@ class Visualizer():
         plt.show()
 
 
-    def plot_graph(self, list, title, xlabel, ylabel, scale=None, width=10, height=6, padding_factor=0.0):
+    def plot_graph(self, list, title, xlabel, ylabel, scale=None, width=10, height=6, padding_factor=0.0, y_ticks=None):
 
       plt.figure(figsize=(width, height))
 
@@ -166,6 +171,10 @@ class Visualizer():
         plt.yscale('symlog', linthresh=1e-15)
 
       plt.ylim(min_limit, max_limit)
+
+      # Set y-axis ticks for more granularity if provided
+      if y_ticks is not None:
+          plt.yticks(y_ticks)
 
       # Plot the loss
       plt.plot(list, label=title)
@@ -231,9 +240,9 @@ class Visualizer():
 # dataloader class
 class DataLoader():
 
-  def __init__(self, B, T):
-    self.B = B
-    self.T = T
+  def __init__(self, model_config):
+    self.B = model_config.batch_size
+    self.T = model_config.block_size
     # this holds the complete training data
     self.data = []
     self.currentPosition = 0
@@ -339,18 +348,20 @@ class FinanceTransformer(nn.Module):
         if isinstance(module, nn.Linear):
             fan_in = module.weight.data.size(1)  # number of input units
             std = 1.0 / math.sqrt(fan_in)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}', vmin=-1.0, vmax=1.0)
+            if hasattr(module, 'RESIDUAL_SCALING_INIT'):
+              std *= (2 * self.config.n_layers) ** -0.5
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}', vmin=-1.0, vmax=1.0)
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
 
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             fan_in = module.weight.data.size(1) # number of inputs units
             std = 1.0 / math.sqrt(fan_in)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
 
 
     # add forward and backward hooks to all submodules
@@ -431,33 +442,24 @@ class FinanceTransformer(nn.Module):
         if grad_input is not None:
           self.module_activities[module_name]['grad output'] = grad_output
 
-    # method that returns a dictionary with module and avg grad for it's weight and bias
-    def get_network_grads(self, pooling="avg"):
-      network_grads = {}
+
+    # method that returns a dictionary with module and avg values for the activities given to the function
+    def compute_module_statistics(self, activityList, pooling="avg"):
+      network_statistics = {}
       # loop through the submodules
       for module_name, activities in self.module_activities.items():
-        if 'weight grads' in activities:
+        # init empty dict for current module
+        network_statistics[module_name] = {}
+        # fill it with avg values for activity in activityList
+        for activity, value in activities.items():
+          if activity in activityList:
+            if pooling == "avg":
+              network_statistics[module_name][f'{activity} avg'] = value.mean()
+            elif pooling == "var":
+              if value.numel() > 1:  # Check if the tensor has more than 1 element
+                network_statistics[module_name][f'{activity} var'] = torch.var(value, unbiased=False)
 
-          # init empty dict for current submodule
-          network_grads[module_name] = {}
-
-          # fill it with avg grads for weight and bias
-          weight_grads = activities['weight grads']
-
-          if pooling == "avg":
-            weight_grads_avg = weight_grads.mean()
-            network_grads[module_name]["weight grads avg"] = weight_grads_avg
-
-        if 'bias grads' in activities:
-
-          # fill it with avg grads for weight and bias
-          bias_grads = activities['bias grads']
-
-          if pooling == "avg":
-            bias_grads_avg = bias_grads.mean()
-            network_grads[module_name]["bias grads avg"] = bias_grads_avg
-
-      return network_grads
+      return network_statistics
 
 
     def forward(self, idx, targets=None):
@@ -495,8 +497,9 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    embd_dim: int = 16
+    batch_size = 4
     block_size: int = 16
+    embd_dim: int = 16
     n_layers: int = 4
     n_head: int = 2
 
@@ -526,7 +529,7 @@ vliser = Visualizer()
 losses = []
 
 # load the data into our program
-dataLoader = DataLoader(B=4, T=model_config.block_size)
+dataLoader = DataLoader(model_config)
 
 data_file = "data.txt"
 
@@ -597,22 +600,25 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
         model.eval()
         # vliser.plot_module_activities(model)
-        print(f"module activities dict: {model.module_activities}")
         # now we want to plot how grads flow through the network a little bit
-        all_weight_grads_avg = []
-        all_bias_grads_avg = []
-        network_grads = model.get_network_grads()
-        print(network_grads)
-        for module, grads in network_grads.items():
-          print(f"Avg Grads for module: {module}:")
-          for gradname, gradvalue in grads.items():
-            if gradname == "weight grads avg":
-              all_weight_grads_avg.append(gradvalue)
-            elif gradname == "bias grads avg":
-              all_bias_grads_avg.append(gradvalue)
-            print(f"{gradname}: {gradvalue}")
-        vliser.plot_graph(all_weight_grads_avg, "weight grad mean from start to end of network", "module number", "grad mean", scale='symlog', padding_factor=0.5)
-        vliser.plot_graph(all_bias_grads_avg, "bias grad mean from start to end of network", "module number", "grad mean", scale='symlog', width=8, height=4, padding_factor=0.5)
+        all_weight_grads_var = []
+        all_bias_grads_var = []
+        all_output_var = []
+        pooling = "var"
+        network_averages = model.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
+        print(f"network_averages: {network_averages}")
+        for module, averages in network_averages.items():
+          print(f"Avg values for module: {module}:")
+          for averagename, averagevalue in averages.items():
+            if averagename == f"weights {pooling}":
+              all_weight_grads_var.append(averagevalue)
+            elif averagename == f"bias {pooling}":
+              all_bias_grads_var.append(averagevalue)
+            elif averagename == f"output {pooling}":
+              all_output_var.append(averagevalue)
+        vliser.plot_graph(all_weight_grads_var, "weight var from start to end of network", "module number", "weights var", padding_factor=0.5)
+        vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
+        vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
 
         for i in range(len(tickerList)):
 
