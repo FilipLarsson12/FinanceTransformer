@@ -151,7 +151,24 @@ class Visualizer():
         plt.show()
 
 
-    def plot_graph(self, list, title, xlabel, ylabel):
+    def plot_graph(self, list, title, xlabel, ylabel, scale=None):
+
+      # Calculate min and max with padding
+      min_val = min(list)
+      max_val = max(list)
+      padding_factor = 0.5
+      min_limit = min_val - padding_factor * min_val
+      #if min_limit <= 0:  # Ensure the minimum limit is strictly positive
+        #min_limit = 1e-10  # Set a small positive value
+      max_limit = max_val + padding_factor * max_val
+
+      if scale == 'log':
+        plt.yscale('log')
+
+      elif scale == 'symlog':
+        plt.yscale('symlog', linthresh=1e-15)
+
+      plt.ylim(min_limit, max_limit)
 
       # Plot the loss
       plt.plot(list, label=title)
@@ -436,9 +453,6 @@ class FinanceTransformer(nn.Module):
 
         if 'bias grads' in activities:
 
-          # init empty dict for current submodule
-          network_grads[module_name] = {}
-
           # fill it with avg grads for weight and bias
           bias_grads = activities['bias grads']
 
@@ -525,9 +539,7 @@ dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01'
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
-model.train()
-
-epochs = 400
+epochs = 200
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -552,6 +564,9 @@ print("\n----- START OF TRAINING -----")
 with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
   for i in range(total_batches):
+  
+      # set the model to train mode
+      model.train()
 
       # load batch
       X, Y = dataLoader.next_batch()
@@ -582,14 +597,27 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
       # eval during training
       # plot the preds for one ticker at a time
       if i == (total_batches-1):
-        vliser.plot_module_activities(model)
 
+        model.eval()
+        # vliser.plot_module_activities(model)
+        print(f"module activities dict: {model.module_activities}")
+        # now we want to plot how grads flow through the network a little bit
+        all_weight_grads_avg = []
+        all_bias_grads_avg = []
         network_grads = model.get_network_grads()
         print(network_grads)
         for module, grads in network_grads.items():
           print(f"Avg Grads for module: {module}:")
           for gradname, gradvalue in grads.items():
+            if gradname == "weight grads avg":
+              all_weight_grads_avg.append(gradvalue)
+            elif gradname == "bias grads avg":
+              all_bias_grads_avg.append(gradvalue)
             print(f"{gradname}: {gradvalue}")
+        #all_weight_grads_avg = [abs(val) for val in all_weight_grads_avg]
+        #all_bias_grads_avg = [abs(val) for val in all_bias_grads_avg]
+        vliser.plot_graph(all_weight_grads_avg, "weight grad mean from start to end of network", "module number", "grad mean", scale='symlog')
+        vliser.plot_graph(all_bias_grads_avg, "bias grad mean from start to end of network", "module number", "grad mean", scale='symlog')
 
         for i in range(len(tickerList)):
 
@@ -622,33 +650,5 @@ print("----- END OF TRAINING -----\n")
 
 model.remove_hooks()
 
-
-# let's visualize how our model performs
-model.eval()
-
 print(f"losses: {losses}")
 vliser.plot_graph(losses, "training loss", "iteration", "loss")
-
-
-# plot the preds for one ticker at a time
-for i in range(len(tickerList)):
-
-  # pluck out all data for current ticker
-  tickerData = dataLoader.data[i][:-1]
-
-  print(f"tickerdata before {tickerData}")
-
-  # reshape to (B, T, 1) for model inference
-  tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-
-  with torch.no_grad():
-    tickerPreds, _ = model(tickerData)
-
-  # pluck out real targets
-  tickerTargets = dataLoader.data[i][1:]
-
-  # reshape to 1D for plot
-  tickerPreds = tickerPreds.view(-1).cpu()
-
-  vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, width=16)
-
