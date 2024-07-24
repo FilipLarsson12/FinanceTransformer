@@ -54,9 +54,9 @@ class SelfAttentionLayer(nn.Module):
 
         # final proj before return
         self.proj = nn.Linear(config.embd_dim, config.embd_dim)
-        # flag for weight scaling to counteract residual streams increasing variance in the forward pass 
+        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
         self.proj.RESIDUAL_SCALING_INIT = 1
-        
+
         # register parameter for the lower triangular mask-matrix
         self.register_buffer("bias",
         torch.tril(torch.ones(config.block_size, config.block_size))
@@ -335,7 +335,7 @@ class FinanceTransformer(nn.Module):
         self.module_activities = {}
 
         # Apply custom weight initialization
-        # self.apply(self.custom_weight_init)
+        self.apply(self.custom_weight_init)
 
     # Method to calculate the number of parameters
     def calculate_parameters(self):
@@ -497,7 +497,7 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    batch_size = 4
+    batch_size: int = 8
     block_size: int = 16
     embd_dim: int = 16
     n_layers: int = 4
@@ -521,12 +521,13 @@ num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 vliser = Visualizer()
 
-# track losses
+# track losses and grad norms
 losses = []
+grad_norms = []
 
 # load the data into our program
 dataLoader = DataLoader(model_config)
@@ -535,7 +536,7 @@ data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2015-11-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2021-01-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
@@ -564,7 +565,7 @@ print("\n----- START OF TRAINING -----")
 with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
   for i in range(total_batches):
-  
+
       # set the model to train mode
       model.train()
 
@@ -585,11 +586,15 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # calculate gradients from loss
         loss.backward()
 
+        # clipping the gradients if they get too high values
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
         # update weights
         optimizer.step()
 
         # append the loss
         losses.append(loss.item())
+        grad_norms.append(norm.item())
 
         # Update the progress bar
         pbar.update(1)
@@ -600,7 +605,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
         model.eval()
         # vliser.plot_module_activities(model)
-        # now we want to plot how grads flow through the network a little bit
+        # now we want to plot the variance of grads and output throughout the network
         all_weight_grads_var = []
         all_bias_grads_var = []
         all_output_var = []
@@ -608,14 +613,13 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         network_averages = model.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
         print(f"network_averages: {network_averages}")
         for module, averages in network_averages.items():
-          print(f"Avg values for module: {module}:")
           for averagename, averagevalue in averages.items():
             if averagename == f"weights {pooling}":
-              all_weight_grads_var.append(averagevalue)
+              all_weight_grads_var.append(averagevalue.cpu().item())
             elif averagename == f"bias {pooling}":
-              all_bias_grads_var.append(averagevalue)
+              all_bias_grads_var.append(averagevalue.cpu().item())
             elif averagename == f"output {pooling}":
-              all_output_var.append(averagevalue)
+              all_output_var.append(averagevalue.cpu().item())
         vliser.plot_graph(all_weight_grads_var, "weight var from start to end of network", "module number", "weights var", padding_factor=0.5)
         vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
         vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
@@ -641,8 +645,6 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
           vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, width=16)
 
-
-
       if prints:
         print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
         print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
@@ -651,5 +653,8 @@ print("----- END OF TRAINING -----\n")
 
 model.remove_hooks()
 
+print(f"grad norms: {grad_norms}")
 print(f"losses: {losses}")
+
+vliser.plot_graph(grad_norms, "grad norms", "iteration", "grad norm")
 vliser.plot_graph(losses, "training loss", "iteration", "loss")
