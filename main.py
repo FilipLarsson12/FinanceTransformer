@@ -119,10 +119,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = self.ln_1(x)
-        x = self.attn(x)
-        x = self.ln_2(x)
-        x = self.mlp(x)
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -151,15 +149,14 @@ class Visualizer():
         plt.show()
 
 
-    def plot_graph(self, list, title, xlabel, ylabel, scale=None):
+    def plot_graph(self, list, title, xlabel, ylabel, scale=None, width=10, height=6, padding_factor=0.0):
+
+      plt.figure(figsize=(width, height))
 
       # Calculate min and max with padding
       min_val = min(list)
       max_val = max(list)
-      padding_factor = 0.5
       min_limit = min_val - padding_factor * min_val
-      #if min_limit <= 0:  # Ensure the minimum limit is strictly positive
-        #min_limit = 1e-10  # Set a small positive value
       max_limit = max_val + padding_factor * max_val
 
       if scale == 'log':
@@ -614,10 +611,8 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
             elif gradname == "bias grads avg":
               all_bias_grads_avg.append(gradvalue)
             print(f"{gradname}: {gradvalue}")
-        #all_weight_grads_avg = [abs(val) for val in all_weight_grads_avg]
-        #all_bias_grads_avg = [abs(val) for val in all_bias_grads_avg]
-        vliser.plot_graph(all_weight_grads_avg, "weight grad mean from start to end of network", "module number", "grad mean", scale='symlog')
-        vliser.plot_graph(all_bias_grads_avg, "bias grad mean from start to end of network", "module number", "grad mean", scale='symlog')
+        vliser.plot_graph(all_weight_grads_avg, "weight grad mean from start to end of network", "module number", "grad mean", scale='symlog', padding_factor=0.5)
+        vliser.plot_graph(all_bias_grads_avg, "bias grad mean from start to end of network", "module number", "grad mean", scale='symlog', width=8, height=4, padding_factor=0.5)
 
         for i in range(len(tickerList)):
 
