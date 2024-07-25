@@ -184,9 +184,9 @@ class Visualizer():
       plt.show()
 
 
-    # function that accesses the module_activities dict of a model and plots submodule activities
-    def plot_module_activities(self, model):
-        for module_name, module_activity in model.module_activities.items():
+    # function that accesses the module_activities dict of a modelObserver and plots the submodule activities
+    def plot_module_activities(self, modelObserver):
+        for module_name, module_activity in modelObserver.module_activities.items():
             print(f"Plotting module activity for {module_name}")
 
             module = module_activity.pop('module', None)
@@ -315,65 +315,24 @@ class DataLoader():
 
 
 
-# model class
-class FinanceTransformer(nn.Module):
+# class that can track and store model activities
+class ModelObserver():
 
-    def __init__(self, config, plot_activity=False):
-        super().__init__()
-        self.config = config
-        assert config.block_size is not None
-        self.block_size = config.block_size
-        self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
-        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
-        self.final_normlayer = nn.LayerNorm(config.embd_dim)
-        self.predictionlayer = nn.Linear(config.embd_dim, 1)
-
-        self.hook_handles = []
-
-        # so I can keep track of states in all the submodules
+    def __init__(self, model):
         self.module_activities = {}
+        self.hook_handles = []
+        self.model = model
 
-        # Apply custom weight initialization
-        self.apply(self.custom_weight_init)
-
-    # Method to calculate the number of parameters
-    def calculate_parameters(self):
-        total_params = sum(p.numel() for p in self.parameters())
-        return total_params
-
-
-    # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
-    def custom_weight_init(self, module):
-        if isinstance(module, nn.Linear):
-            fan_in = module.weight.data.size(1)  # number of input units
-            std = 1.0 / math.sqrt(fan_in)
-            if hasattr(module, 'RESIDUAL_SCALING_INIT'):
-              std *= (2 * self.config.n_layers) ** -0.5
-            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
-
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            fan_in = module.weight.data.size(1) # number of inputs units
-            std = 1.0 / math.sqrt(fan_in)
-            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
-
-
-    # add forward and backward hooks to all submodules
+    # add forward and backward hooks to all submodules of the model
     def register_hooks(self, save_grads=False, only_save_modules=None):
-        for name, module in self.named_modules():
-            # if only_save_modules is None we save activities for all modules else we only save for modules in only_save_modules-list
+        for name, module in self.model.named_modules():
+            # if only_save_modules is None we save activities for all modules else we only save for modules in only_save_modules list
             if only_save_modules is None or name in only_save_modules:
                 if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Embedding, nn.GELU, nn.LeakyReLU)):
                     forward_handle = module.register_forward_hook(lambda m, i, o, n=name: self.save_module_activity_forward(n, m, i, o))
                     self.hook_handles.append(forward_handle)
                     if save_grads:
-                        if module is not self.position_embeddings and module is not self.price_embeddings:
+                        if module is not self.model.position_embeddings and module is not self.model.price_embeddings:
                             backward_handle = module.register_full_backward_hook(lambda m, gi, go, n=name: self.save_module_activity_backward(n, m, gi, go))
                             self.hook_handles.append(backward_handle)
 
@@ -462,6 +421,52 @@ class FinanceTransformer(nn.Module):
       return network_statistics
 
 
+
+# model class
+class FinanceTransformer(nn.Module):
+
+    def __init__(self, config, plot_activity=False):
+        super().__init__()
+        self.config = config
+        assert config.block_size is not None
+        self.block_size = config.block_size
+        self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
+        self.final_normlayer = nn.LayerNorm(config.embd_dim)
+        self.predictionlayer = nn.Linear(config.embd_dim, 1)
+
+        # Apply custom weight initialization
+        self.apply(self.custom_weight_init)
+
+
+    # Method to calculate the number of parameters
+    def calculate_parameters(self):
+        total_params = sum(p.numel() for p in self.parameters())
+        return total_params
+
+
+    # will see if I change this, currently this init actually scales up weights which can be seen from the heatmap plots
+    def custom_weight_init(self, module):
+        if isinstance(module, nn.Linear):
+            fan_in = module.weight.data.size(1)  # number of input units
+            std = 1.0 / math.sqrt(fan_in)
+            if hasattr(module, 'RESIDUAL_SCALING_INIT'):
+              std *= (2 * self.config.n_layers) ** -0.5
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            fan_in = module.weight.data.size(1) # number of inputs units
+            std = 1.0 / math.sqrt(fan_in)
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Original weights for {module}')
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
+
+
     def forward(self, idx, targets=None):
         _, T, _ = idx.size()
 
@@ -497,11 +502,11 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    batch_size: int = 8
-    block_size: int = 16
-    embd_dim: int = 16
-    n_layers: int = 4
-    n_head: int = 2
+    batch_size: int = 4
+    block_size: int = 4
+    embd_dim: int = 4
+    n_layers: int = 2
+    n_head: int = 1
 
 # ----------------------------------------------------------------------------------------
 
@@ -509,12 +514,14 @@ class ModelConfig():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-
 #init
 model_config = ModelConfig()
 
 model = FinanceTransformer(model_config)
 model.to(device)
+
+# object to track model activities
+modelObserver = ModelObserver(model)
 
 # get the size of the model
 num_parameters = model.calculate_parameters()
@@ -536,7 +543,7 @@ data_file = "data.txt"
 
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2021-01-01')
+dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2016-01-01')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
@@ -553,8 +560,8 @@ print(f"total batches: {total_batches}")
 prints = False
 plots = False
 
-# register hooks so model can save state during forward and backward pass
-model.register_hooks(save_grads=True)
+# register hooks so modelObserver can save model state during forward and backward pass
+modelObserver.register_hooks(save_grads=True)
 
 print(f"Model config: {model_config}")
 
@@ -604,13 +611,13 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
       if i == (total_batches-1):
 
         model.eval()
-        # vliser.plot_module_activities(model)
+        # vliser.plot_module_activities(modelObserver)
         # now we want to plot the variance of grads and output throughout the network
         all_weight_grads_var = []
         all_bias_grads_var = []
         all_output_var = []
         pooling = "var"
-        network_averages = model.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
+        network_averages = modelObserver.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
         print(f"network_averages: {network_averages}")
         for module, averages in network_averages.items():
           for averagename, averagevalue in averages.items():
@@ -651,7 +658,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
 print("----- END OF TRAINING -----\n")
 
-model.remove_hooks()
+modelObserver.remove_hooks()
 
 print(f"grad norms: {grad_norms}")
 print(f"losses: {losses}")
