@@ -132,7 +132,7 @@ class Block(nn.Module):
 class Visualizer():
 
 
-    def plot_preds(self, actual_prices, preds, width=10):
+    def plot_preds(self, actual_prices, preds, title, width=10):
         actual_prices = np.array(actual_prices)
         preds = np.array(preds)
 
@@ -146,7 +146,7 @@ class Visualizer():
         plt.plot(x_values, actual_prices, color='blue', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Actual Prices')  # '-' specifies the line style, 'o' adds points
         plt.plot(x_values, preds, color='red', linestyle='-', marker='o', markersize=2, linewidth=0.5, alpha=0.7, label='Predicted Prices')  # '-' specifies the line style, 'o' adds points
 
-        plt.title('Stock Price Plot')
+        plt.title(title)
         plt.xlabel('Day')
         plt.ylabel('Price')
         plt.grid(True)
@@ -244,14 +244,18 @@ class DataLoader():
     self.B = model_config.batch_size
     self.T = model_config.block_size
     # this holds the complete training data
-    self.data = []
+    self.trainData = []
+    # this holds the complete test data
+    self.testData = []
     self.currentPosition = 0
     # this is annoying but we need it to prevent input -> target mapping from
     # last price of one ticker to first price of next ticker
     self.currentTicker = 0
-    self.nTickers = 0
+    self.nTrainTickers = 0
+    self.nTestTickers = 0
     # state to keep track of epochs in training
     self.dataPerEpoch = 0
+
 
   # Function to normalize the prices using z-normalization
   def normalize(self, prices):
@@ -261,7 +265,8 @@ class DataLoader():
       # normalized_prices = normalized_prices*10 # Loss = 0.459
       return normalized_prices
 
-  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate):
+
+  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, dataType="Train"):
       with open(filepath, 'w') as file:
           for ticker in tickerList:
               # download data from Yahoo Finance
@@ -273,7 +278,12 @@ class DataLoader():
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
-              pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
+              if dataType == "Train":
+                pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
+              # we don't care about batch size if we load in test set data, we only care about block size
+              elif dataType == "Test":
+                pop_elements = (len(normalized_prices)-1) % self.T
+
               print(f"\npopping {pop_elements} prices from ticker {ticker} when loading data into dataloader")
               if pop_elements != 0:
                 normalized_prices = normalized_prices[:-pop_elements]
@@ -284,15 +294,21 @@ class DataLoader():
                   file.write(f"{price}\n")
 
               # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
-              self.data.append(normalized_prices.tolist())
-              self.nTickers += 1
-              self.dataPerEpoch += len(normalized_prices) - 1
+              if dataType == "Train":
+                self.trainData.append(normalized_prices.tolist())
+                self.nTrainTickers += 1
+                self.dataPerEpoch += len(normalized_prices) - 1
+
+              elif dataType == "Test":
+                self.nTestTickers += 1
+                self.testData.append(normalized_prices.tolist())
+
 
   def next_batch(self):
 
     # pluck out next batch
-    inp = self.data[self.currentTicker][self.currentPosition : self.currentPosition + self.B * self.T]
-    targets = self.data[self.currentTicker][self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
+    inp = self.trainData[self.currentTicker][self.currentPosition : self.currentPosition + self.B * self.T]
+    targets = self.trainData[self.currentTicker][self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
 
     # convert to tensors and reshape, also add extra dim so shape becomes [B, T, 1]
     inp = torch.Tensor(inp).view(self.B, self.T).unsqueeze(-1)
@@ -302,10 +318,10 @@ class DataLoader():
     self.currentPosition += self.B * self.T
 
     # if next batch is out of bounds reset pointer
-    if self.currentPosition + self.B * self.T + 1 > len(self.data[self.currentTicker]):
+    if self.currentPosition + self.B * self.T + 1 > len(self.trainData[self.currentTicker]):
       self.currentPosition = 0
       # if we are at the last ticker go to first ticker again
-      if self.currentTicker == (self.nTickers - 1):
+      if self.currentTicker == (self.nTrainTickers - 1):
         self.currentTicker = 0
       # else go to next ticker
       else:
@@ -502,11 +518,11 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    batch_size: int = 4
-    block_size: int = 4
-    embd_dim: int = 4
-    n_layers: int = 2
-    n_head: int = 1
+    batch_size: int = 8
+    block_size: int = 8
+    embd_dim: int = 8
+    n_layers: int = 4
+    n_head: int = 2
 
 # ----------------------------------------------------------------------------------------
 
@@ -539,11 +555,11 @@ grad_norms = []
 # load the data into our program
 dataLoader = DataLoader(model_config)
 
-data_file = "data.txt"
-
 tickerList = ['MSFT']
 
-dataLoader.load_data_from_yfinance(tickerList, data_file, startDate='2015-01-01', endDate='2016-01-01')
+train_data_file = "train_data.txt"
+
+dataLoader.load_data_from_yfinance(tickerList, train_data_file, startDate='2015-01-01', endDate='2016-01-01', dataType="Train")
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
@@ -595,7 +611,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
         # clipping the gradients if they get too high values
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
+
         # update weights
         optimizer.step()
 
@@ -631,10 +647,11 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
         vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
 
-        for i in range(len(tickerList)):
+        # visualize performance on training set
+        for i in range(dataLoader.nTrainTickers):
 
           # pluck out all data for current ticker
-          tickerData = dataLoader.data[i][:-1]
+          tickerData = dataLoader.trainData[i][:-1]
 
           print(f"tickerdata before {tickerData}")
 
@@ -645,16 +662,39 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
             tickerPreds, _ = model(tickerData)
 
           # pluck out real targets
-          tickerTargets = dataLoader.data[i][1:]
+          tickerTargets = dataLoader.trainData[i][1:]
 
           # reshape to 1D for plot
           tickerPreds = tickerPreds.view(-1).cpu()
 
-          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, width=16)
+          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Training data", width=16)
 
-      if prints:
-        print(f"Price Embedding Layer Gradients: {model.price_embeddings.weight.grad}")
-        print(f"Position Embedding Layer Gradients: {model.position_embeddings.weight.grad}")
+
+        # visualize performance on test set
+        test_data_file = "test_data.txt"
+        dataLoader.load_data_from_yfinance(tickerList, test_data_file, startDate='2016-01-01', endDate='2017-01-01', dataType="Test")
+
+        for i in range(dataLoader.nTestTickers):
+
+          # pluck out all data for current ticker
+          tickerData = dataLoader.testData[i][:-1]
+
+          print(f"tickerdata before {tickerData}")
+
+          # reshape to (B, T, 1) for model inference
+          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
+
+          with torch.no_grad():
+            tickerPreds, _ = model(tickerData)
+
+          # pluck out real targets
+          tickerTargets = dataLoader.testData[i][1:]
+
+          # reshape to 1D for plot
+          tickerPreds = tickerPreds.view(-1).cpu()
+
+          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Test data", width=16)
+
 
 print("----- END OF TRAINING -----\n")
 
