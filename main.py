@@ -352,6 +352,25 @@ class DataLoader():
     return inp, targets
 
 
+  # method that prepares inputs and targets for evaluating model performance on a ticker, we can ignore batch size here
+  def generate_ids_targets_for_eval(self, tickerIndex, block_size, device, split):
+
+    if split == "test":
+      tickerData = dataLoader.testData[tickerIndex][:-1]
+      tickerTargets = dataLoader.testData[tickerIndex][1:]
+
+    elif split == "train":
+      tickerData = dataLoader.trainData[tickerIndex][:-1]
+      tickerTargets = dataLoader.trainData[tickerIndex][1:]
+
+    # reshape to (B, T, 1) for model 
+    tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
+    # pluck out real targets
+    tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+
+    return tickerData, tickerTargets
+
+
 
 # class that can track and store model activities
 class ModelObserver():
@@ -571,17 +590,32 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 vliser = Visualizer()
 
 # track losses and grad norms
-losses = []
+train_losses = []
+test_losses = []
 grad_norms = []
 
 # load the data into our program
 dataLoader = DataLoader(model_config)
 
+# training specification
 trainTickerList = ['MSFT']
-
 train_data_file = "train_data.txt"
+train_startDate = '2019-01-01'
+train_endDate = '2023-01-01'
 
-dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate='2012-01-01', endDate='2016-01-01', split="train")
+# load the train set into dataloader
+dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
+
+
+# testing specification
+testTickerList = ['AAPL']
+test_data_file = "test_data.txt"
+test_startDate = '2023-01-01'
+test_endDate = '2024-01-01'
+
+# load the test set into dataloader
+dataLoader.load_data_from_yfinance(testTickerList, test_data_file, startDate=test_startDate, endDate=test_endDate, split="test")
+
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
@@ -622,14 +656,14 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
       Y = Y.to(device)
 
       # get prediction
-      preds, loss = model(X, Y)
+      preds, train_loss = model(X, Y)
 
-      if loss is not None:
+      if train_loss is not None:
         # reset gradients
         optimizer.zero_grad()
 
         # calculate gradients from loss
-        loss.backward()
+        train_loss.backward()
 
         # clipping the gradients if they get too high values
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -637,18 +671,38 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # update weights
         optimizer.step()
 
-        # append the loss
-        losses.append(loss.item())
+        # append the training loss
+        train_losses.append(train_loss.item())
         grad_norms.append(norm.item())
 
         # Update the progress bar
         pbar.update(1)
 
       # eval during training
+      if i % 50 == 0:
+        model.eval()
+
+        for i in range(dataLoader.nTestTickers):
+
+          # pluck out all data for current ticker
+          tickerData, tickerTargets = dataLoader.generate_ids_targets_for_eval(i, model_config.block_size, device, "test")
+
+          with torch.no_grad():
+            tickerPreds, test_loss = model(tickerData, tickerTargets)
+
+          # append the test loss
+          test_losses.append(test_loss.item())
+
+          # reshape to 1D for plot
+          tickerPreds = tickerPreds.view(-1).cpu()
+          tickerTargets = tickerTargets.view(-1).cpu()
+
+          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Test split, ticker: {testTickerList[i]}, period: {test_startDate} to {test_endDate}", width=16)
+
+
       # plot the preds for one ticker at a time
       if i == (total_batches-1):
 
-        model.eval()
         # vliser.plot_module_activities(modelObserver)
         # now we want to plot the variance of grads and output throughout the network
         all_weight_grads_var = []
@@ -673,16 +727,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         for i in range(dataLoader.nTrainTickers):
 
           # pluck out all data for current ticker
-          tickerData = dataLoader.trainData[i][:-1]
-
-          print(f"tickerdata before {tickerData}")
-
-          # reshape to (B, T, 1) for model inference
-          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-
-          # pluck out real targets
-          tickerTargets = dataLoader.trainData[i][1:]
-          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+          tickerData, tickerTargets = dataLoader.generate_ids_targets_for_eval(i, model_config.block_size, device, "train")
 
           with torch.no_grad():
             tickerPreds, train_loss = model(tickerData, tickerTargets)
@@ -691,43 +736,8 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
           tickerPreds = tickerPreds.view(-1).cpu()
           tickerTargets = tickerTargets.view(-1).cpu()
 
-          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Training data", width=16)
+          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Training split, ticker: {trainTickerList[i]}, period: {train_startDate} to {train_endDate}", width=16)
           print(f"\ntrain loss is: {train_loss}")
-
-
-        # visualize performance on test set
-        testTickerList = ['MSFT']
-
-        test_data_file = "test_data.txt"
-
-        dataLoader.load_data_from_yfinance(testTickerList, test_data_file, startDate='2016-01-01', endDate='2017-01-01', split="test")
-
-        for i in range(dataLoader.nTestTickers):
-
-          # pluck out all data for current ticker
-          tickerData = dataLoader.testData[i][:-1]
-
-          print(f"tickerdata before {tickerData}")
-
-          # reshape to (B, T, 1) for model inference
-          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-          print(f"Shape of tickerData is: {tickerData.shape}")
-
-          # pluck out real targets
-          tickerTargets = dataLoader.testData[i][1:]
-          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
-          print(f"Shape of tickerTargets is: {tickerTargets.shape}")
-
-          with torch.no_grad():
-            tickerPreds, test_loss = model(tickerData, tickerTargets)
-
-          # reshape to 1D for plot
-          tickerPreds = tickerPreds.view(-1).cpu()
-          tickerTargets = tickerTargets.view(-1).cpu()
-
-          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Test data", width=16)
-
-          print(f"\ntest loss is: {test_loss}")
 
 
 print("----- END OF TRAINING -----\n")
@@ -735,7 +745,8 @@ print("----- END OF TRAINING -----\n")
 modelObserver.remove_hooks()
 
 print(f"grad norms: {grad_norms}")
-print(f"losses: {losses}")
+print(f"train_losses: {train_losses}")
 
 vliser.plot_graph(grad_norms, "grad norms", "iteration", "grad norm")
-vliser.plot_graph(losses, "training loss", "iteration", "loss")
+vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
+vliser.plot_graph(test_losses, "test loss", "iteration", "loss")
