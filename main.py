@@ -255,33 +255,55 @@ class DataLoader():
     self.nTestTickers = 0
     # state to keep track of epochs in training
     self.dataPerEpoch = 0
-
+    # state to keep track of training period so we use consistent normalization of train and test set
+    self.trainStartDate = None
+    self.trainEndDate = None 
 
   # Function to normalize the prices using z-normalization
-  def normalize(self, prices):
-      mean_price = np.mean(prices)
-      std_price = np.std(prices)
+  def normalize(self, tickername, prices, split="train"):
+      # use the mean and std of train set to normalize train and test set
+    
+      if split == "train":
+        mean_price = np.mean(prices)
+        std_price = np.std(prices)
+      elif split == "test":
+        # we use the training period to normalize the test set's prices (for example if we trained on 2010-2015 data 
+        # we use this period's mean and std when normalizing the test ticker's prices)
+        if self.trainStartDate is None or self.trainEndDate is None:
+          raise ValueError("Training period not set. Cannot normalize test data.")
+        data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
+        prices_for_mean_and_std = data['Close'].values
+        mean_price = np.mean(prices_for_mean_and_std)
+        std_price = np.std(prices_for_mean_and_std)
+        
+
       normalized_prices = (prices - mean_price) / std_price
-      # normalized_prices = normalized_prices*10 # Loss = 0.459
       return normalized_prices
 
 
-  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, dataType="Train"):
+  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train"):
+      # keep track of training period to use for z-normalizing test prices later
+      if split == "train":
+        self.trainStartDate = startDate
+        self.trainEndDate = endDate
+
       with open(filepath, 'w') as file:
           for ticker in tickerList:
               # download data from Yahoo Finance
               data = yf.download(ticker, start=startDate, end=endDate)
+              if data.empty:
+                raise ValueError(f"No data found for ticker {ticker} between {startDate} and {startDate}.")
               prices = data['Close'].values
 
               # normalize prices of the ticker
-              normalized_prices = self.normalize(prices)
+              normalized_prices = self.normalize(ticker, prices, split)
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
-              if dataType == "Train":
+              if split == "train":
                 pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
               # we don't care about batch size if we load in test set data, we only care about block size
-              elif dataType == "Test":
+              elif split == "test":
                 pop_elements = (len(normalized_prices)-1) % self.T
 
               print(f"\npopping {pop_elements} prices from ticker {ticker} when loading data into dataloader")
@@ -294,12 +316,12 @@ class DataLoader():
                   file.write(f"{price}\n")
 
               # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
-              if dataType == "Train":
+              if split == "train":
                 self.trainData.append(normalized_prices.tolist())
                 self.nTrainTickers += 1
                 self.dataPerEpoch += len(normalized_prices) - 1
 
-              elif dataType == "Test":
+              elif split == "test":
                 self.nTestTickers += 1
                 self.testData.append(normalized_prices.tolist())
 
@@ -555,15 +577,15 @@ grad_norms = []
 # load the data into our program
 dataLoader = DataLoader(model_config)
 
-tickerList = ['MSFT']
+trainTickerList = ['MSFT']
 
 train_data_file = "train_data.txt"
 
-dataLoader.load_data_from_yfinance(tickerList, train_data_file, startDate='2015-01-01', endDate='2016-01-01', dataType="Train")
+dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate='2012-01-01', endDate='2016-01-01', split="train")
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
-epochs = 200
+epochs = 30
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -658,21 +680,27 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
           # reshape to (B, T, 1) for model inference
           tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
 
-          with torch.no_grad():
-            tickerPreds, _ = model(tickerData)
-
           # pluck out real targets
           tickerTargets = dataLoader.trainData[i][1:]
+          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+
+          with torch.no_grad():
+            tickerPreds, train_loss = model(tickerData, tickerTargets)
 
           # reshape to 1D for plot
           tickerPreds = tickerPreds.view(-1).cpu()
+          tickerTargets = tickerTargets.view(-1).cpu()
 
           vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Training data", width=16)
+          print(f"\ntrain loss is: {train_loss}")
 
 
         # visualize performance on test set
+        testTickerList = ['MSFT']
+
         test_data_file = "test_data.txt"
-        dataLoader.load_data_from_yfinance(tickerList, test_data_file, startDate='2016-01-01', endDate='2017-01-01', dataType="Test")
+
+        dataLoader.load_data_from_yfinance(testTickerList, test_data_file, startDate='2016-01-01', endDate='2017-01-01', split="test")
 
         for i in range(dataLoader.nTestTickers):
 
@@ -683,17 +711,23 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
 
           # reshape to (B, T, 1) for model inference
           tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-
-          with torch.no_grad():
-            tickerPreds, _ = model(tickerData)
+          print(f"Shape of tickerData is: {tickerData.shape}")
 
           # pluck out real targets
           tickerTargets = dataLoader.testData[i][1:]
+          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+          print(f"Shape of tickerTargets is: {tickerTargets.shape}")
+
+          with torch.no_grad():
+            tickerPreds, test_loss = model(tickerData, tickerTargets)
 
           # reshape to 1D for plot
           tickerPreds = tickerPreds.view(-1).cpu()
+          tickerTargets = tickerTargets.view(-1).cpu()
 
           vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title="Stock price plots Test data", width=16)
+
+          print(f"\ntest loss is: {test_loss}")
 
 
 print("----- END OF TRAINING -----\n")
