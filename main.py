@@ -245,17 +245,17 @@ class DataLoader():
     self.T = model_config.block_size
     # this holds the complete training data
     self.trainData = []
-    # this holds the complete test data
-    self.testData = []
+    # this holds the complete val data
+    self.valData = []
     self.currentPosition = 0
     # this is annoying but we need it to prevent input -> target mapping from
     # last price of one ticker to first price of next ticker
     self.currentTicker = 0
     self.nTrainTickers = 0
-    self.nTestTickers = 0
+    self.nValTickers = 0
     # state to keep track of epochs in training
     self.dataPerEpoch = 0
-    # state to keep track of training period so we use consistent normalization of train and test set
+    # state to keep track of training period so we use consistent normalization of train and val set
     self.trainStartDate = None
     self.trainEndDate = None 
     # dictionary to save mean and std for each ticker
@@ -264,7 +264,7 @@ class DataLoader():
 
   # Function to normalize the prices using z-normalization
   def normalize(self, tickername, prices, split="train"):
-      # use the mean and std of train set to normalize train and test set
+      # use the mean and std of train set to normalize train and val set
     
       if split == "train":
         mean_price = np.mean(prices)
@@ -272,11 +272,11 @@ class DataLoader():
         # save the mean and std for the ticker
         self.tickers_mean_std[tickername] = (mean_price, std_price)
 
-      elif split == "test":
-        # we use the training period to normalize the test set's prices (for example if we trained on 2010-2015 data 
-        # we use this period's mean and std when normalizing the test ticker's prices)
+      elif split == "val":
+        # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data 
+        # we use this period's mean and std when normalizing the val ticker's prices)
         if self.trainStartDate is None or self.trainEndDate is None:
-          raise ValueError("Training period not set. Cannot normalize test data.")
+          raise ValueError("Training period not set. Cannot normalize val data.")
         if tickername not in self.tickers_mean_std:
           data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
           prices_for_mean_and_std = data['Close'].values
@@ -322,7 +322,7 @@ class DataLoader():
               if split == "train":
                 pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
               # we don't care about batch size if we load in test set data, we only care about block size
-              elif split == "test":
+              elif split == "val":
                 pop_elements = (len(normalized_prices)-1) % self.T
 
               print(f"\npopping {pop_elements} prices from ticker {ticker} when loading data into dataloader")
@@ -340,9 +340,9 @@ class DataLoader():
                 self.nTrainTickers += 1
                 self.dataPerEpoch += len(normalized_prices) - 1
 
-              elif split == "test":
-                self.nTestTickers += 1
-                self.testData.append(normalized_prices.tolist())
+              elif split == "val":
+                self.nValTickers += 1
+                self.valData.append(normalized_prices.tolist())
 
 
   def next_batch(self):
@@ -598,28 +598,32 @@ grad_norms = []
 dataLoader = DataLoader(model_config)
 
 # training specification
-trainTickerList = ['AAPL', 'TLSA']
+trainTickerList = ['SMCI']
 train_data_file = "train_data.txt"
-train_startDate = '2019-01-01'
-train_endDate = '2023-01-01'
+train_startDate = '2019-08-01'
+train_endDate = '2024-08-01'
 
 # load the train set into dataloader
 dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
 
 
-# testing specification
-testTickerList = ['NVDA', 'AMZN']
-test_data_file = "test_data.txt"
-test_startDate = '2023-01-01'
-test_endDate = '2024-01-01'
+# validation specification
+valTickerList = ['NVDA']
+val_data_file = "val_data.txt"
+val_startDate = '2023-08-01'
+val_endDate = '2024-07-01'
 
-# load the test set into dataloader
-dataLoader.load_data_from_yfinance(testTickerList, test_data_file, startDate=test_startDate, endDate=test_endDate, split="test")
+# load the val set into dataloader
+dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
 
+# how many batches between each val loss measurement
+val_interval = 50
+# record lowest val loss
+lowest_val_loss = None
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
-epochs = 30
+epochs = 200
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -679,16 +683,16 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         pbar.update(1)
 
       # eval during training
-      if i % 50 == 0:
+      if i % val_interval == 0:
         model.eval()
 
         val_loss = 0
 
-        for tickerIndex in range(dataLoader.nTestTickers):
+        for tickerIndex in range(dataLoader.nValTickers):
 
-          # pluck out all data for current ticker
-          tickerData = dataLoader.testData[tickerIndex][:-1]
-          tickerTargets = dataLoader.testData[tickerIndex][1:]
+          # pluck out all data for ticker
+          tickerData = dataLoader.valData[tickerIndex][:-1]
+          tickerTargets = dataLoader.valData[tickerIndex][1:]
 
           # reshape to (-1, T, 1) for model inference
           tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
@@ -700,19 +704,21 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
           # add to the overall loss
           val_loss += val_loss_ticker
 
-          plot_val_tickers = True
-          if plot_val_tickers:
+          # plot tickers if we are recording the last validation loss
+          if (i+val_interval) >= total_batches:
             # reshape to 1D for plot
             tickerPreds = tickerPreds.view(-1).cpu().numpy()
             tickerTargets = tickerTargets.view(-1).cpu().numpy()
 
-            vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {testTickerList[tickerIndex]}, period: {test_startDate} to {test_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
-
+            vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
         # calculate average loss over tickers
-        val_loss = val_loss / dataLoader.nTestTickers
+        val_loss = val_loss / dataLoader.nValTickers
         # append the test loss
         val_losses.append(val_loss.item())
+        # check if this is lowest loss
+        if lowest_val_loss is None or val_loss.item() < lowest_val_loss:
+          lowest_val_loss = val_loss
 
 
       # plot the preds for one ticker at a time
@@ -749,3 +755,4 @@ print(f"val_losses: {val_losses}")
 vliser.plot_graph(grad_norms, "grad norms", "iteration", "grad norm")
 vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
 vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
+print(f"Lowest val loss achieved: {lowest_val_loss}")
