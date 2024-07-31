@@ -258,6 +258,9 @@ class DataLoader():
     # state to keep track of training period so we use consistent normalization of train and test set
     self.trainStartDate = None
     self.trainEndDate = None 
+    # dictionary to save mean and std for each ticker
+    self.tickers_mean_std = {}
+
 
   # Function to normalize the prices using z-normalization
   def normalize(self, tickername, prices, split="train"):
@@ -266,15 +269,23 @@ class DataLoader():
       if split == "train":
         mean_price = np.mean(prices)
         std_price = np.std(prices)
+        # save the mean and std for the ticker
+        self.tickers_mean_std[tickername] = (mean_price, std_price)
+
       elif split == "test":
         # we use the training period to normalize the test set's prices (for example if we trained on 2010-2015 data 
         # we use this period's mean and std when normalizing the test ticker's prices)
         if self.trainStartDate is None or self.trainEndDate is None:
           raise ValueError("Training period not set. Cannot normalize test data.")
-        data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
-        prices_for_mean_and_std = data['Close'].values
-        mean_price = np.mean(prices_for_mean_and_std)
-        std_price = np.std(prices_for_mean_and_std)
+        if tickername not in self.tickers_mean_std:
+          data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
+          prices_for_mean_and_std = data['Close'].values
+          mean_price = np.mean(prices_for_mean_and_std)
+          std_price = np.std(prices_for_mean_and_std)
+          # save the mean and std for the ticker
+          self.tickers_mean_std[tickername] = (mean_price, std_price)
+        else:
+          mean_price, std_price = self.tickers_mean_std[tickername]
         
 
       normalized_prices = (prices - mean_price) / std_price
@@ -352,23 +363,22 @@ class DataLoader():
     return inp, targets
 
 
-  # method that prepares inputs and targets for evaluating model performance on a ticker, we can ignore batch size here
-  def generate_ids_targets_for_eval(self, tickerIndex, block_size, device, split):
+  # method that prepares inputs and targets and evaluates model performance on all test tickers, we can ignore batch size here
+  def generate_ids_targets_for_eval(self, tickerIndex, block_size, device):
+      # init empty
+      tickerData = []
+      tickerTargets = []
+      # collect ids and targets for all test tickers
+      for i in range(self.nTestTickers):
+          tickerData.append(self.testData[i][:-1])
+          tickerTargets.append(self.testData[i][1:])
 
-    if split == "test":
-      tickerData = dataLoader.testData[tickerIndex][:-1]
-      tickerTargets = dataLoader.testData[tickerIndex][1:]
+      # reshape to (-1, T, 1) for model 
+      tickerData = torch.Tensor(tickerData).view(-1, block_size, 1).to(device)
+      # pluck out real targets
+      tickerTargets = torch.Tensor(tickerTargets).view(-1, block_size, 1).to(device)
 
-    elif split == "train":
-      tickerData = dataLoader.trainData[tickerIndex][:-1]
-      tickerTargets = dataLoader.trainData[tickerIndex][1:]
-
-    # reshape to (B, T, 1) for model 
-    tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-    # pluck out real targets
-    tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
-
-    return tickerData, tickerTargets
+      return tickerData, tickerTargets
 
 
 
@@ -598,7 +608,7 @@ grad_norms = []
 dataLoader = DataLoader(model_config)
 
 # training specification
-trainTickerList = ['MSFT']
+trainTickerList = ['AAPL', 'TLSA']
 train_data_file = "train_data.txt"
 train_startDate = '2019-01-01'
 train_endDate = '2023-01-01'
@@ -608,7 +618,7 @@ dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=t
 
 
 # testing specification
-testTickerList = ['AAPL']
+testTickerList = ['NVDA']
 test_data_file = "test_data.txt"
 test_startDate = '2023-01-01'
 test_endDate = '2024-01-01'
@@ -682,22 +692,20 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
       if i % 50 == 0:
         model.eval()
 
-        for i in range(dataLoader.nTestTickers):
+        # pluck out all data for current ticker
+        tickerData, tickerTargets = dataLoader.generate_ids_targets_for_eval(i, model_config.block_size, device)
 
-          # pluck out all data for current ticker
-          tickerData, tickerTargets = dataLoader.generate_ids_targets_for_eval(i, model_config.block_size, device, "test")
+        with torch.no_grad():
+          tickerPreds, test_loss = model(tickerData, tickerTargets)
 
-          with torch.no_grad():
-            tickerPreds, test_loss = model(tickerData, tickerTargets)
+        # append the test loss
+        test_losses.append(test_loss.item())
 
-          # append the test loss
-          test_losses.append(test_loss.item())
+        # reshape to 1D for plot
+        tickerPreds = tickerPreds.view(-1).cpu()
+        tickerTargets = tickerTargets.view(-1).cpu()
 
-          # reshape to 1D for plot
-          tickerPreds = tickerPreds.view(-1).cpu()
-          tickerTargets = tickerTargets.view(-1).cpu()
-
-          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Test split, ticker: {testTickerList[i]}, period: {test_startDate} to {test_endDate}", width=16)
+        vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Test split, tickers: {testTickerList} period: {test_startDate} to {test_endDate}", width=16)
 
 
       # plot the preds for one ticker at a time
@@ -723,21 +731,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
         vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
 
-        # visualize performance on training set
-        for i in range(dataLoader.nTrainTickers):
-
-          # pluck out all data for current ticker
-          tickerData, tickerTargets = dataLoader.generate_ids_targets_for_eval(i, model_config.block_size, device, "train")
-
-          with torch.no_grad():
-            tickerPreds, train_loss = model(tickerData, tickerTargets)
-
-          # reshape to 1D for plot
-          tickerPreds = tickerPreds.view(-1).cpu()
-          tickerTargets = tickerTargets.view(-1).cpu()
-
-          vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Training split, ticker: {trainTickerList[i]}, period: {train_startDate} to {train_endDate}", width=16)
-          print(f"\ntrain loss is: {train_loss}")
+        #vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Training split, ticker: {trainTickerList[i]}, period: {train_startDate} to {train_endDate}", width=16)
 
 
 print("----- END OF TRAINING -----\n")
