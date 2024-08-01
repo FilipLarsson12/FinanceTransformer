@@ -241,7 +241,8 @@ class Visualizer():
 # normalizer class capable of using 2 different normalization schemes. Z-normalization as well as percentage-normalization
 class DataNormalizer():
 
-  def __init__(self):
+  def __init__(self, norm_scheme):
+      self.norm_scheme = norm_scheme
       # dictionary to save mean and std for each ticker for z-denormalization
       self.tickers_mean_std = {}
       # dictionary to save initial prices for each ticker for percentage-denormalization
@@ -250,7 +251,27 @@ class DataNormalizer():
       self.trainStartDate = None
       self.trainEndDate = None
 
-    # Function to normalize the prices using z-normalization
+      self.tickers_min_max = {}
+
+  def normalize(self, tickername, prices, split):
+    if self.norm_scheme == "z":
+      return self.z_normalize(tickername, prices, split)
+    elif self.norm_scheme == "percentage":
+      return self.percentage_denormalize(tickername, prices, split)
+    elif self.norm_scheme == "min_max":
+      return self.min_max_normalize(tickername, prices, split)
+
+
+  def de_normalize(self, tickername, normalized_prices):
+    if self.norm_scheme == "z":
+      return self.z_denormalize(tickername, normalized_prices)
+    elif self.norm_scheme == "percentage":
+      return self.percentage_denormalize(tickername, prices)
+    elif self.norm_scheme == "min_max":
+      return self.min_max_denormalize(tickername, prices)
+
+
+  # Function to normalize the prices using z-normalization
   def z_normalize(self, tickername, prices, split="train"):
       # use the mean and std of train set to normalize train and val set
       if split == "train":
@@ -297,14 +318,40 @@ class DataNormalizer():
 
       return normalized_prices
 
-  def percentage_denormalize(self, tickername, log_normalized_prices):
+  def percentage_denormalize(self, tickername, normalized_prices):
       if tickername not in self.initial_prices:
           raise ValueError(f"Initial price for ticker {tickername} not found.")
-      normalized_prices = np.exp(log_normalized_prices)
+      normalized_prices = np.exp(normalized_prices)
 
       # Denormalize prices
       original_prices = normalized_prices * self.initial_prices[tickername]
       
+      return original_prices
+
+
+  # Function to normalize the prices using min-max scaling
+  def min_max_normalize(self, tickername, prices, split="train"):
+      if split == "train":
+          min_price = np.min(prices)
+          max_price = np.max(prices)
+          # save the min and max for the ticker
+          self.tickers_min_max[tickername] = (min_price, max_price)
+      elif split == "val":
+          min_price = np.min(prices)
+          max_price = np.max(prices)
+          # min_price, max_price = self.tickers_min_max[tickername]
+          self.tickers_min_max[tickername] = (min_price, max_price)
+
+      normalized_prices = 2 * (prices - min_price) / (max_price - min_price) - 1
+      return normalized_prices
+
+
+  # Function to reverse the min-max normalization
+  def min_max_denormalize(self, tickername, normalized_prices):
+      if tickername not in self.tickers_min_max:
+          raise ValueError(f"Min and max for ticker {tickername} not found.")
+      min_price, max_price = self.tickers_min_max[tickername]
+      original_prices = (normalized_prices + 1) / 2 * (max_price - min_price) + min_price
       return original_prices
 
 
@@ -330,7 +377,7 @@ class DataLoader():
     self.normalizer = normalizer
 
 
-  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train", norm_type="z"):
+  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train"):
       # keep track of training period to use for z-normalizing test prices later
       if split == "train":
           self.normalizer.trainStartDate = startDate
@@ -345,10 +392,8 @@ class DataLoader():
               prices = data['Close'].values
 
               # normalize prices
-              if norm_type == "z":
-                normalized_prices = self.normalizer.z_normalize(ticker, prices, split)
-              elif norm_type == "percentage":
-                normalized_prices = self.normalizer.percentage_normalize(ticker, prices, split)
+              normalized_prices = self.normalizer.normalize(ticker, prices, split)
+
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
@@ -635,28 +680,26 @@ normalized_val_losses = []
 grad_norms = []
 
 # load the data into our program
-normalizer = DataNormalizer()
+normalizer = DataNormalizer(norm_scheme="z")
 dataLoader = DataLoader(model_config, normalizer)
-norm_type = "percentage"
 
 # Training specification
-trainTickerList = ['SMCI', 'AMZN', 'GME', 'CHWY', 'FFIE']
+trainTickerList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'JPM', 'V', 'JNJ']
 train_data_file = "train_data.txt"
 train_startDate = '2018-08-01'
-train_endDate = '2024-07-01'
+train_endDate = '2023-08-01'
 
 # Load the train set into dataloader
-dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train", norm_type=norm_type)
-
+dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
 
 # Validation specification
-valTickerList = ['NVDA']
+valTickerList = ['BABA', 'NFLX', 'PFE', 'AMD']
 val_data_file = "val_data.txt"
 val_startDate = '2023-08-02'
 val_endDate = '2024-07-01'
 
 # Load the validation set into dataloader
-dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val", norm_type=norm_type)
+dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
 
 
 # how many batches between each val loss measurement
@@ -761,38 +804,16 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
             tickerPreds = tickerPreds.view(-1).cpu().numpy()
             tickerTargets = tickerTargets.view(-1).cpu().numpy()
 
-            deNormalize_prices = False
+            deNormalize_prices = True
             if deNormalize_prices:
               # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
               current_ticker = valTickerList[tickerIndex]
-              if norm_type == "z":
-                tickerPreds = normalizer.z_denormalize(current_ticker, tickerPreds)
-                tickerTargets = normalizer.z_denormalize(current_ticker, tickerTargets)
-              elif norm_type == "percentage":
-                tickerPreds = normalizer.percentage_denormalize(current_ticker, tickerPreds)
-                tickerTargets = normalizer.percentage_denormalize(current_ticker, tickerTargets)
+
+              tickerPreds = normalizer.de_normalize(current_ticker, tickerPreds)
+              tickerTargets = normalizer.de_normalize(current_ticker, tickerTargets)
 
             vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
-
-        for tickerIndex in range(dataLoader.nTrainTickers):
-
-          # pluck out all data for ticker
-          tickerData = dataLoader.trainData[tickerIndex][:-1]
-          tickerTargets = dataLoader.trainData[tickerIndex][1:]
-
-          # reshape to (-1, T, 1) for model inference
-          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
-          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
-
-          with torch.no_grad():
-            tickerPreds, val_loss_ticker = model(tickerData, tickerTargets)
-
-            tickerPreds = tickerPreds.view(-1).cpu().numpy()
-            tickerTargets = tickerTargets.view(-1).cpu().numpy()
-
-
-            vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Train Ticker: {trainTickerList[tickerIndex]}, period: {train_startDate} to {train_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
         # calculate average loss over tickers
         val_loss = val_loss / dataLoader.nValTickers
@@ -843,4 +864,3 @@ vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
 vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
 print(f"Lowest val loss achieved: {lowest_val_loss}")
 print(f"Lowest normalized val loss achieved: {lowest_normalized_val_loss}")
-
