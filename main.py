@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from typing import Literal
 
 # Function to plot heatmap for weights
 def plot_heatmap(ax, data, module, module_name, activity):
@@ -241,12 +242,13 @@ class Visualizer():
 class DataNormalizer():
 
   def __init__(self):
-    # dictionary to save mean and std for each ticker for z-denormalization
-    self.tickers_mean_std = {}
-    # state to keep track of training period so we use consistent z-normalization of train and val set
-    self.trainStartDate = None
-    self.trainEndDate = None 
-  
+      # dictionary to save mean and std for each ticker for z-denormalization
+      self.tickers_mean_std = {}
+      # dictionary to save initial prices for each ticker for percentage-denormalization
+      self.initial_prices = {}
+      # state to keep track of training period so we use consistent z-normalization of train and val set
+      self.trainStartDate = None
+      self.trainEndDate = None
 
     # Function to normalize the prices using z-normalization
   def z_normalize(self, tickername, prices, split="train"):
@@ -284,12 +286,32 @@ class DataNormalizer():
       return original_prices
     
 
+  # Function to normalize the prices using percentage change
+  def percentage_normalize(self, tickername, prices, split="train"):
+
+      self.initial_prices[tickername] = prices[0]
+
+      # Normalize each price by the first price
+      normalized_prices = prices / prices[0]
+      normalized_prices = np.log(normalized_prices)
+
+      return normalized_prices
+
+  def percentage_denormalize(self, tickername, log_normalized_prices):
+      if tickername not in self.initial_prices:
+          raise ValueError(f"Initial price for ticker {tickername} not found.")
+      normalized_prices = np.exp(log_normalized_prices)
+
+      # Denormalize prices
+      original_prices = normalized_prices * self.initial_prices[tickername]
+      
+      return original_prices
 
 
 # dataloader class
 class DataLoader():
 
-  def __init__(self, model_config):
+  def __init__(self, model_config, normalizer):
     self.B = model_config.batch_size
     self.T = model_config.block_size
     # this holds the complete training data
@@ -304,56 +326,15 @@ class DataLoader():
     self.nValTickers = 0
     # state to keep track of epochs in training
     self.dataPerEpoch = 0
-    # state to keep track of training period so we use consistent normalization of train and val set
-    self.trainStartDate = None
-    self.trainEndDate = None 
-    # dictionary to save mean and std for each ticker
-    self.tickers_mean_std = {}
+    # initialize normalizer
+    self.normalizer = normalizer
 
 
-  # Function to normalize the prices using z-normalization
-  def normalize(self, tickername, prices, split="train"):
-      # use the mean and std of train set to normalize train and val set
-    
-      if split == "train":
-        mean_price = np.mean(prices)
-        std_price = np.std(prices)
-        # save the mean and std for the ticker
-        self.tickers_mean_std[tickername] = (mean_price, std_price)
-
-      elif split == "val":
-        # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data 
-        # we use this period's mean and std when normalizing the val ticker's prices)
-        if self.trainStartDate is None or self.trainEndDate is None:
-          raise ValueError("Training period not set. Cannot normalize val data.")
-        if tickername not in self.tickers_mean_std:
-          data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
-          prices_for_mean_and_std = data['Close'].values
-          mean_price = np.mean(prices_for_mean_and_std)
-          std_price = np.std(prices_for_mean_and_std)
-          # save the mean and std for the ticker
-          self.tickers_mean_std[tickername] = (mean_price, std_price)
-        else:
-          mean_price, std_price = self.tickers_mean_std[tickername]
-        
-
-      normalized_prices = (prices - mean_price) / std_price
-      return normalized_prices
-
-  # Function to reverse the normalization
-  def denormalize(self, tickername, normalized_prices):
-      if tickername not in self.tickers_mean_std:
-          raise ValueError(f"Statistics for ticker {tickername} not found.")
-      mean_price, std_price = self.tickers_mean_std[tickername]
-      original_prices = (normalized_prices * std_price) + mean_price
-      return original_prices
-
-
-  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train"):
+  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train", norm_type="z"):
       # keep track of training period to use for z-normalizing test prices later
       if split == "train":
-        self.trainStartDate = startDate
-        self.trainEndDate = endDate
+          self.normalizer.trainStartDate = startDate
+          self.normalizer.trainEndDate = endDate
 
       with open(filepath, 'w') as file:
           for ticker in tickerList:
@@ -363,8 +344,11 @@ class DataLoader():
                 raise ValueError(f"No data found for ticker {ticker} between {startDate} and {startDate}.")
               prices = data['Close'].values
 
-              # normalize prices of the ticker
-              normalized_prices = self.normalize(ticker, prices, split)
+              # normalize prices
+              if norm_type == "z":
+                normalized_prices = self.normalizer.z_normalize(ticker, prices, split)
+              elif norm_type == "percentage":
+                normalized_prices = self.normalizer.percentage_normalize(ticker, prices, split)
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
@@ -595,7 +579,10 @@ class FinanceTransformer(nn.Module):
         if targets is not None:
             # now we get predictions at every position in the sequence in every batch
             preds = self.predictionlayer(x) # (batch_am, block_size, 1)
-            loss_fn = nn.MSELoss()
+            if self.config.loss_fn == "L1":
+              loss_fn = nn.L1Loss()
+            elif self.config.loss_fn == "MSE":
+              loss_fn = nn.MSELoss()
             loss = loss_fn(preds, targets)
         else:
             preds = self.predictionlayer(x) # (batch_am, block_size, 1)
@@ -608,11 +595,12 @@ class FinanceTransformer(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    batch_size: int = 8
-    block_size: int = 8
-    embd_dim: int = 8
-    n_layers: int = 4
-    n_head: int = 2
+    batch_size: int = 4
+    block_size: int = 16
+    embd_dim: int = 16
+    n_layers: int = 8
+    n_head: int = 4
+    loss_fn: Literal['L1', 'MSE'] = "MSE"
 
 # ----------------------------------------------------------------------------------------
 
@@ -634,47 +622,52 @@ num_parameters = model.calculate_parameters()
 print(f"Number of parameters in the model: {num_parameters}")
 
 # define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
 vliser = Visualizer()
 
 # track losses and grad norms
 train_losses = []
 val_losses = []
+# used so I can compare losses between different normalization schemes
+normalized_val_losses = []
+# used to inspect training stability
 grad_norms = []
 
 # load the data into our program
-dataLoader = DataLoader(model_config)
+normalizer = DataNormalizer()
+dataLoader = DataLoader(model_config, normalizer)
+norm_type = "percentage"
 
 # Training specification
-trainTickerList = ['SMCI', 'AMZN', 'GME', 'CHWY', 'FFIE', 'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'META',
-                   'NFLX', 'ADBE', 'NVDA', 'AMD', 'BABA', 'INTC', 'PYPL', 'CRM', 'QCOM', 'ORCL']
+trainTickerList = ['SMCI', 'AMZN', 'GME', 'CHWY', 'FFIE']
 train_data_file = "train_data.txt"
-train_startDate = '2012-08-01'
-train_endDate = '2022-08-01'
+train_startDate = '2018-08-01'
+train_endDate = '2024-07-01'
 
 # Load the train set into dataloader
-dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
+dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train", norm_type=norm_type)
 
 
 # Validation specification
-valTickerList = ['NVDA', 'AMD', 'TSLA', 'GOOGL', 'AAPL']
+valTickerList = ['NVDA']
 val_data_file = "val_data.txt"
-val_startDate = '2022-08-02'
+val_startDate = '2023-08-02'
 val_endDate = '2024-07-01'
 
 # Load the validation set into dataloader
-dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
+dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val", norm_type=norm_type)
 
 
 # how many batches between each val loss measurement
 val_interval = 50
 # record lowest val loss
 lowest_val_loss = float('inf')
+lowest_normalized_val_loss = float('inf')
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
-epochs = 6
+epochs = 20
 
 batch_size = dataLoader.B * dataLoader.T
 
@@ -738,6 +731,8 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         model.eval()
 
         val_loss = 0
+        # enables comparison between losses from different data normalization schemes
+        normalized_val_loss = 0
 
         for tickerIndex in range(dataLoader.nValTickers):
 
@@ -748,12 +743,17 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
           # reshape to (-1, T, 1) for model inference
           tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
           tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+          
+          # keep track of the variance of the data
+          data_variance = torch.var(tickerTargets, unbiased=False).item()
 
           with torch.no_grad():
             tickerPreds, val_loss_ticker = model(tickerData, tickerTargets)
 
           # add to the overall loss
           val_loss += val_loss_ticker
+          normalized_val_loss += (val_loss_ticker / data_variance)
+
 
           # plot tickers if we are recording the last validation loss
           if (i+val_interval) >= total_batches:
@@ -761,23 +761,51 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
             tickerPreds = tickerPreds.view(-1).cpu().numpy()
             tickerTargets = tickerTargets.view(-1).cpu().numpy()
 
-            deNormalize_prices = True
+            deNormalize_prices = False
             if deNormalize_prices:
               # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
               current_ticker = valTickerList[tickerIndex]
-              tickerPreds = dataLoader.denormalize(current_ticker, tickerPreds)
-              tickerTargets = dataLoader.denormalize(current_ticker, tickerTargets)
+              if norm_type == "z":
+                tickerPreds = normalizer.z_denormalize(current_ticker, tickerPreds)
+                tickerTargets = normalizer.z_denormalize(current_ticker, tickerTargets)
+              elif norm_type == "percentage":
+                tickerPreds = normalizer.percentage_denormalize(current_ticker, tickerPreds)
+                tickerTargets = normalizer.percentage_denormalize(current_ticker, tickerTargets)
 
             vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
+
+        for tickerIndex in range(dataLoader.nTrainTickers):
+
+          # pluck out all data for ticker
+          tickerData = dataLoader.trainData[tickerIndex][:-1]
+          tickerTargets = dataLoader.trainData[tickerIndex][1:]
+
+          # reshape to (-1, T, 1) for model inference
+          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
+          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+
+          with torch.no_grad():
+            tickerPreds, val_loss_ticker = model(tickerData, tickerTargets)
+
+            tickerPreds = tickerPreds.view(-1).cpu().numpy()
+            tickerTargets = tickerTargets.view(-1).cpu().numpy()
+
+
+            vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Train Ticker: {trainTickerList[tickerIndex]}, period: {train_startDate} to {train_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
+
         # calculate average loss over tickers
         val_loss = val_loss / dataLoader.nValTickers
+        normalized_val_loss = normalized_val_loss / dataLoader.nValTickers
         # append the test loss
         val_losses.append(val_loss.item())
+        normalized_val_losses.append(normalized_val_loss.item())
+
         # check if this is lowest loss
         if val_loss.item() < lowest_val_loss:
           lowest_val_loss = val_loss
-
+        if normalized_val_loss.item() < lowest_normalized_val_loss:
+          lowest_normalized_val_loss = normalized_val_loss
 
       # plot the preds for one ticker at a time
       if i == (total_batches-1):
@@ -814,3 +842,5 @@ vliser.plot_graph(grad_norms, "grad norms", "iteration", "grad norm")
 vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
 vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
 print(f"Lowest val loss achieved: {lowest_val_loss}")
+print(f"Lowest normalized val loss achieved: {lowest_normalized_val_loss}")
+
