@@ -257,7 +257,7 @@ class DataNormalizer():
     if self.norm_scheme == "z":
       return self.z_normalize(tickername, prices, split)
     elif self.norm_scheme == "percentage":
-      return self.percentage_denormalize(tickername, prices, split)
+      return self.percentage_normalize(tickername, prices, split)
     elif self.norm_scheme == "min_max":
       return self.min_max_normalize(tickername, prices, split)
 
@@ -266,9 +266,9 @@ class DataNormalizer():
     if self.norm_scheme == "z":
       return self.z_denormalize(tickername, normalized_prices)
     elif self.norm_scheme == "percentage":
-      return self.percentage_denormalize(tickername, prices)
+      return self.percentage_denormalize(tickername, normalized_prices)
     elif self.norm_scheme == "min_max":
-      return self.min_max_denormalize(tickername, prices)
+      return self.min_max_denormalize(tickername, normalized_prices)
 
 
   # Function to normalize the prices using z-normalization
@@ -680,11 +680,11 @@ normalized_val_losses = []
 grad_norms = []
 
 # load the data into our program
-normalizer = DataNormalizer(norm_scheme="z")
+normalizer = DataNormalizer(norm_scheme="min_max")
 dataLoader = DataLoader(model_config, normalizer)
 
 # Training specification
-trainTickerList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'JPM', 'V', 'JNJ']
+trainTickerList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'JPM', 'V', 'JNJ', 'QCOM', 'NVDA']
 train_data_file = "train_data.txt"
 train_startDate = '2018-08-01'
 train_endDate = '2023-08-01'
@@ -693,7 +693,7 @@ train_endDate = '2023-08-01'
 dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
 
 # Validation specification
-valTickerList = ['BABA', 'NFLX', 'PFE', 'AMD']
+valTickerList = ['BABA', 'NFLX', 'PFE', 'AMD', 'NVDA', 'AAPL']
 val_data_file = "val_data.txt"
 val_startDate = '2023-08-02'
 val_endDate = '2024-07-01'
@@ -707,6 +707,7 @@ val_interval = 50
 # record lowest val loss
 lowest_val_loss = float('inf')
 lowest_normalized_val_loss = float('inf')
+total_absolute_price_diff = 0
 
 print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
@@ -812,6 +813,11 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
               tickerPreds = normalizer.de_normalize(current_ticker, tickerPreds)
               tickerTargets = normalizer.de_normalize(current_ticker, tickerTargets)
 
+              element_wise_diff = tickerPreds - tickerTargets
+              absolute_diff = np.abs(element_wise_diff)
+              sum_absolute_diff = np.sum(absolute_diff)
+              total_absolute_price_diff += sum_absolute_diff
+              
             vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
 
@@ -864,3 +870,4 @@ vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
 vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
 print(f"Lowest val loss achieved: {lowest_val_loss}")
 print(f"Lowest normalized val loss achieved: {lowest_normalized_val_loss}")
+print(f"Total absolute price difference: {total_absolute_price_diff}")
