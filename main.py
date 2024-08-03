@@ -389,11 +389,23 @@ class DataLoader():
               data = yf.download(ticker, start=startDate, end=endDate)
               if data.empty:
                 raise ValueError(f"No data found for ticker {ticker} between {startDate} and {startDate}.")
+
               prices = data['Close'].values
 
               # normalize prices
               normalized_prices = self.normalizer.normalize(ticker, prices, split)
 
+              # adding volumes for my model to analyze as well
+              volumes = data['Volume'].values
+              key_figures = yf.Ticker(ticker)
+              # Get the outstanding shares
+              outstanding_shares = key_figures.info['sharesOutstanding']
+
+              # normalize volumes
+              normalized_volumes = volumes / outstanding_shares
+              print(f"normalized volumes is: {normalized_volumes}")
+
+              print(f"len of prices and volume equal? {len(normalized_prices) == len(normalized_volumes)}")
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
@@ -403,41 +415,48 @@ class DataLoader():
               elif split == "val":
                 pop_elements = (len(normalized_prices)-1) % self.T
 
-              print(f"\npopping {pop_elements} prices from ticker {ticker} when loading data into dataloader")
+              print(f"\npopping {pop_elements} prices and volumes from ticker {ticker} when loading data into dataloader")
               if pop_elements != 0:
                 normalized_prices = normalized_prices[:-pop_elements]
+                normalized_volumes = normalized_volumes[:-pop_elements]
 
               # write prices to file, file's purpose is for me to look at and sanity check
               file.write(f"--- Ticker: {ticker} ---\n")
-              for price in normalized_prices:
-                  file.write(f"{price}\n")
+              for price, volume in zip(normalized_prices, normalized_volumes):
+                  file.write(f"'p': {price}, v: {volume}\n")
 
               # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
               if split == "train":
-                self.trainData.append(normalized_prices.tolist())
+                self.trainData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
                 self.nTrainTickers += 1
                 self.dataPerEpoch += len(normalized_prices) - 1
 
               elif split == "val":
                 self.nValTickers += 1
-                self.valData.append(normalized_prices.tolist())
+                self.valData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
 
 
   def next_batch(self):
 
     # pluck out next batch
-    inp = self.trainData[self.currentTicker][self.currentPosition : self.currentPosition + self.B * self.T]
-    targets = self.trainData[self.currentTicker][self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
+    ticker_prices, inp_volumes = self.trainData[self.currentTicker]
+    batch_prices = ticker_prices[self.currentPosition : self.currentPosition + self.B * self.T]
+    batch_volumes = inp_volumes[self.currentPosition : self.currentPosition + self.B * self.T]
+    batch_targets = ticker_prices[self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
 
     # convert to tensors and reshape, also add extra dim so shape becomes [B, T, 1]
-    inp = torch.Tensor(inp).view(self.B, self.T).unsqueeze(-1)
-    targets = torch.Tensor(targets).view(self.B, self.T).unsqueeze(-1)
+    batch_prices = torch.Tensor(batch_prices).view(self.B, self.T, 1)
+    batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
+    batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
+
+    # combine price and volume into one tensor
+    batch_inputs = torch.cat((batch_prices, batch_volumes), dim=2)
 
     # update pointer
     self.currentPosition += self.B * self.T
 
     # if next batch is out of bounds reset pointer
-    if self.currentPosition + self.B * self.T + 1 > len(self.trainData[self.currentTicker]):
+    if self.currentPosition + self.B * self.T + 1 > len(ticker_prices):
       self.currentPosition = 0
       # if we are at the last ticker go to first ticker again
       if self.currentTicker == (self.nTrainTickers - 1):
@@ -446,7 +465,7 @@ class DataLoader():
       else:
         self.currentTicker += 1
 
-    return inp, targets
+    return batch_inputs, batch_targets
 
 
 
@@ -566,6 +585,7 @@ class FinanceTransformer(nn.Module):
         assert config.block_size is not None
         self.block_size = config.block_size
         self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.volume_embeddings = nn.Linear(1, config.embd_dim)  # Assuming 1 input dim for volume
         self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
         self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
         self.final_normlayer = nn.LayerNorm(config.embd_dim)
@@ -609,12 +629,17 @@ class FinanceTransformer(nn.Module):
 
         # input dim is: (batch_am, block_size, 1)
 
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
-        pos_emb = self.position_embeddings(pos) # position embeddings of shape (T, embd_dim)
-        price_emb = self.price_embeddings(idx) # price embeddings of shape (B, T, embd_dim)
+        price_data = idx[:, :, 0].unsqueeze(-1)  # Extract price data
+        volume_data = idx[:, :, 1].unsqueeze(-1)  # Extract volume data
 
-        # adding positional embeddings to the price embeddings
-        x = price_emb + pos_emb # pos updated price embeddings of shape (B, T, embd_dim)
+        price_emb = self.price_embeddings(price_data)  # Embed price
+        volume_emb = self.volume_embeddings(volume_data)  # Embed volume
+
+        x = price_emb + volume_emb  # Add embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # Positional encoding
+        pos_emb = self.position_embeddings(pos)
+
+        x += pos_emb  # Add positional encoding
 
         for i, block in enumerate(self.layers):
             x = block(x) # (batch_am, block_size, embd_dim)
@@ -781,18 +806,28 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         for tickerIndex in range(dataLoader.nValTickers):
 
           # pluck out all data for ticker
-          tickerData = dataLoader.valData[tickerIndex][:-1]
-          tickerTargets = dataLoader.valData[tickerIndex][1:]
+          tickerData_prices, tickerData_volumes = dataLoader.valData[tickerIndex]
+
+          # input data (excluding the last price and volume)
+          shifted_tickerData_prices = tickerData_prices[:-1]
+          shifted_tickerData_volumes = tickerData_volumes[:-1]
+
+          # targets are shifted by one timestep
+          tickerTargets = tickerData_prices[1:]
 
           # reshape to (-1, T, 1) for model inference
-          tickerData = torch.Tensor(tickerData).view(-1, model_config.block_size, 1).to(device)
+          shifted_tickerData_prices = torch.Tensor(shifted_tickerData_prices).view(-1, model_config.block_size, 1).to(device)
+          shifted_tickerData_volumes = torch.Tensor(shifted_tickerData_volumes).view(-1, model_config.block_size, 1).to(device)          
           tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
+
+          # combine price and volume into one tensor
+          shifted_tickerData = torch.cat((shifted_tickerData_prices, shifted_tickerData_volumes), dim=2)
           
           # keep track of the variance of the data
           data_variance = torch.var(tickerTargets, unbiased=False).item()
 
           with torch.no_grad():
-            tickerPreds, val_loss_ticker = model(tickerData, tickerTargets)
+            tickerPreds, val_loss_ticker = model(shifted_tickerData, tickerTargets)
 
           # add to the overall loss
           val_loss += val_loss_ticker
@@ -827,6 +862,7 @@ with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
         # append the test loss
         val_losses.append(val_loss.item())
         normalized_val_losses.append(normalized_val_loss.item())
+              
 
         # check if this is lowest loss
         if val_loss.item() < lowest_val_loss:
@@ -870,4 +906,5 @@ vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
 vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
 print(f"Lowest val loss achieved: {lowest_val_loss}")
 print(f"Lowest normalized val loss achieved: {lowest_normalized_val_loss}")
+total_absolute_price_diff = total_absolute_price_diff / dataLoader.nValTickers
 print(f"Total absolute price difference: {total_absolute_price_diff}")
