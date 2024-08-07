@@ -33,103 +33,6 @@ def plot_heatmap(ax, data, module, module_name, activity):
 
 
 
-# class that defines the self attention layers
-class SelfAttentionLayer(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        # we use a linear layer to produce the k, q and v.
-        # we use the same dimensionality for them as the embd_dim
-        self.config = config
-        self.embd_dim = config.embd_dim
-        # must make sure that we can use several attention heads
-        assert config.embd_dim % config.n_head == 0, f"Embedding dimension {config.embd_dim} is not divisible by the number of heads {config.n_head}."
-
-        self.n_head = config.n_head
-        self.embd_dim = config.embd_dim
-
-        # to calculate k, q and v
-        self.calc_k = nn.Linear(config.embd_dim, config.embd_dim)
-        self.calc_q = nn.Linear(config.embd_dim, config.embd_dim)
-        self.calc_v = nn.Linear(config.embd_dim, config.embd_dim)
-
-        # final proj before return
-        self.proj = nn.Linear(config.embd_dim, config.embd_dim)
-        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
-        self.proj.RESIDUAL_SCALING_INIT = 1
-
-        # register parameter for the lower triangular mask-matrix
-        self.register_buffer("bias",
-        torch.tril(torch.ones(config.block_size, config.block_size))
-        .view(1, config.block_size, config.block_size))
-
-    def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embd_dim
-
-        k = self.calc_k(x)
-        q = self.calc_q(x)
-        v = self.calc_v(x)
-
-        # split key, query and values into their own attention heads
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
-
-        # calculating how much the embeddings "care" about one another
-        k = k.transpose(-2, -1)
-        keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-
-        # make it impossible for embeddings to get information from embeddings that comes after
-        keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :T, :T] == 0, float('-inf'))
-
-        keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
-
-        # calculate updated embd_values for the embeddings based on how much information should flow between them
-        x = keyquery_matrix @ v # (B, number_heads, T, T) @ (B, number_heads, T, head_size) = (B, number_heads, T, head_size)
-        x = x.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
-        # final proj
-        x = self.proj(x)
-
-        return x
-
-
-# class that defines a MLP
-class MLP(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.proj_1 = nn.Linear(config.embd_dim, 4 * config.embd_dim)
-        self.act_fn = nn.GELU(approximate='tanh') # Loss = 1.01 after 500 epochs
-        #self.act_fn = nn.LeakyReLU() # Loss = 0.16 after 500 epochs
-        self.proj_2 = nn.Linear(config.embd_dim * 4, config.embd_dim)
-        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
-        self.proj_2.RESIDUAL_SCALING_INIT = 1
-
-    def forward(self, x):
-        x = self.proj_1(x)
-        x = self.act_fn(x)
-        x = self.proj_2(x)
-        return x
-
-
-# class that defines a "block" in the model, it contains a layernorm to normalize activations, attention layer, MLP layer and another layernorm
-
-class Block(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = nn.LayerNorm(config.embd_dim)
-        self.attn = SelfAttentionLayer(config)
-        self.ln_2 = nn.LayerNorm(config.embd_dim)
-        self.mlp = MLP(config)
-
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-
 class Visualizer():
 
 
@@ -361,6 +264,7 @@ class DataLoader():
   def __init__(self, model_config, normalizer):
     self.B = model_config.batch_size
     self.T = model_config.block_size
+    self.include_volume = model_config.include_volume
     # this holds the complete training data
     self.trainData = []
     # this holds the complete val data
@@ -395,17 +299,17 @@ class DataLoader():
               # normalize prices
               normalized_prices = self.normalizer.normalize(ticker, prices, split)
 
-              # adding volumes for my model to analyze as well
-              volumes = data['Volume'].values
-              key_figures = yf.Ticker(ticker)
-              # Get the outstanding shares
-              outstanding_shares = key_figures.info['sharesOutstanding']
+              if self.include_volume:
+                # adding volumes for my model to analyze as well
+                volumes = data['Volume'].values
+                key_figures = yf.Ticker(ticker)
+                # Get the outstanding shares
+                outstanding_shares = key_figures.info['sharesOutstanding']
 
-              # normalize volumes
-              normalized_volumes = volumes / outstanding_shares
-              print(f"normalized volumes is: {normalized_volumes}")
+                # normalize volumes
+                normalized_volumes = volumes / outstanding_shares
 
-              print(f"len of prices and volume equal? {len(normalized_prices) == len(normalized_volumes)}")
+                print(f"len of prices and volume equal? {len(normalized_prices) == len(normalized_volumes)}")
 
               # popping prices if they dont modulo with my model block_size
               # subtracting one because inputs and targets will have len - 1 elements
@@ -418,39 +322,66 @@ class DataLoader():
               print(f"\npopping {pop_elements} prices and volumes from ticker {ticker} when loading data into dataloader")
               if pop_elements != 0:
                 normalized_prices = normalized_prices[:-pop_elements]
-                normalized_volumes = normalized_volumes[:-pop_elements]
+                if self.include_volume:
+                  normalized_volumes = normalized_volumes[:-pop_elements]
 
               # write prices to file, file's purpose is for me to look at and sanity check
               file.write(f"--- Ticker: {ticker} ---\n")
-              for price, volume in zip(normalized_prices, normalized_volumes):
-                  file.write(f"'p': {price}, v: {volume}\n")
+                            
+              if self.include_volume:
+                for price, volume in zip(normalized_prices, normalized_volumes):
+                    file.write(f"'p': {price}, v: {volume}\n")
+              else:
+                for price in normalized_prices:
+                  file.write(f"'p': {price}\n")
 
               # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
               if split == "train":
-                self.trainData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
+                if self.include_volume:
+                  self.trainData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
+                else:
+                  self.trainData.append(normalized_prices.tolist())
+
                 self.nTrainTickers += 1
                 self.dataPerEpoch += len(normalized_prices) - 1
 
               elif split == "val":
+                if self.include_volume:
+                  self.valData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
+                else:
+                  self.valData.append(normalized_prices.tolist())
                 self.nValTickers += 1
-                self.valData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
+
 
 
   def next_batch(self):
 
     # pluck out next batch
-    ticker_prices, inp_volumes = self.trainData[self.currentTicker]
+    if self.include_volume:
+      ticker_prices, inp_volumes = self.trainData[self.currentTicker]
+
+    else:
+      ticker_prices = self.trainData[self.currentTicker]
+
     batch_prices = ticker_prices[self.currentPosition : self.currentPosition + self.B * self.T]
-    batch_volumes = inp_volumes[self.currentPosition : self.currentPosition + self.B * self.T]
+
+    if self.include_volume:
+      batch_volumes = inp_volumes[self.currentPosition : self.currentPosition + self.B * self.T]
+
     batch_targets = ticker_prices[self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
 
     # convert to tensors and reshape, also add extra dim so shape becomes [B, T, 1]
     batch_prices = torch.Tensor(batch_prices).view(self.B, self.T, 1)
-    batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
+    if self.include_volume:
+      batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
+
     batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
 
     # combine price and volume into one tensor
-    batch_inputs = torch.cat((batch_prices, batch_volumes), dim=2)
+    if self.include_volume:
+      batch_inputs = torch.cat((batch_prices, batch_volumes), dim=2)
+    else:
+      batch_inputs = batch_prices
 
     # update pointer
     self.currentPosition += self.B * self.T
@@ -585,11 +516,12 @@ class FinanceTransformer(nn.Module):
         assert config.block_size is not None
         self.block_size = config.block_size
         self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        self.volume_embeddings = nn.Linear(1, config.embd_dim)  # Assuming 1 input dim for volume
-        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim)
+        if config.include_volume:
+          self.volume_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim * config.num_input_features)
         self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
-        self.final_normlayer = nn.LayerNorm(config.embd_dim)
-        self.predictionlayer = nn.Linear(config.embd_dim, 1)
+        self.final_normlayer = nn.LayerNorm(config.embd_dim * config.num_input_features)
+        self.predictionlayer = nn.Linear(config.embd_dim * config.num_input_features, 1)
 
         # Apply custom weight initialization
         self.apply(self.custom_weight_init)
@@ -623,54 +555,175 @@ class FinanceTransformer(nn.Module):
 
 
     def forward(self, idx, targets=None):
-        _, T, _ = idx.size()
+        # idx: (batch_size, block_size, 2) where 2 represents price and volume features
+
+        _, T, F = idx.size()
 
         assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
+        # assert F == self.config.num_input_features, f"Cannot forward sequence of incorrect amount of input features, got: {F} expected: {self.config.num_input_features}"
 
-        # input dim is: (batch_am, block_size, 1)
 
-        price_data = idx[:, :, 0].unsqueeze(-1)  # Extract price data
-        volume_data = idx[:, :, 1].unsqueeze(-1)  # Extract volume data
+        # Extract price and volume data, each will be of shape (batch_size, block_size, 1)
+        price_data = idx[:, :, 0].unsqueeze(-1)  # (batch_size, block_size, 1)
+        if self.config.include_volume:
+          volume_data = idx[:, :, 1].unsqueeze(-1)  # (batch_size, block_size, 1)
 
-        price_emb = self.price_embeddings(price_data)  # Embed price
-        volume_emb = self.volume_embeddings(volume_data)  # Embed volume
+        # Embed price and volume data
+        price_emb = self.price_embeddings(price_data)  # (batch_size, block_size, embd_dim)
+        if self.config.include_volume:
+         volume_emb = self.volume_embeddings(volume_data)  # (batch_size, block_size, embd_dim)
 
-        x = price_emb + volume_emb  # Add embeddings
+        # Concatenate price and volume embeddings along the last dimension
+        if self.config.include_volume:
+          x = torch.cat((price_emb, volume_emb), dim=-1)  # (batch_size, block_size, embd_dim * 2)
+        else:
+          x = price_emb
+
+        # Generate positional encodings for the sequence length T
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # Positional encoding
         pos_emb = self.position_embeddings(pos)
 
-        x += pos_emb  # Add positional encoding
+        # Add positional encodings to the concatenated embeddings
+        x = x + pos_emb  # (batch_size, block_size, embd_dim * 2)
 
+        # Pass the concatenated embeddings through the transformer blocks
         for i, block in enumerate(self.layers):
-            x = block(x) # (batch_am, block_size, embd_dim)
+            x = block(x)  # (batch_size, block_size, embd_dim * 2)
 
-        x = self.final_normlayer(x) # (batch_am, block_size, embd_dim)
+        # Apply the final layer normalization
+        x = self.final_normlayer(x)  # (batch_size, block_size, embd_dim * 2)
 
+        # Predict and compute loss if targets are provided
         if targets is not None:
-            # now we get predictions at every position in the sequence in every batch
-            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            preds = self.predictionlayer(x)  # (batch_size, block_size, 1)
             if self.config.loss_fn == "L1":
-              loss_fn = nn.L1Loss()
+                loss_fn = nn.L1Loss()
             elif self.config.loss_fn == "MSE":
-              loss_fn = nn.MSELoss()
+                loss_fn = nn.MSELoss()
             loss = loss_fn(preds, targets)
         else:
-            preds = self.predictionlayer(x) # (batch_am, block_size, 1)
+            preds = self.predictionlayer(x)  # (batch_size, block_size, 1)
             loss = None
 
         return preds, loss
+
+
+# class that defines the self attention layers
+class SelfAttentionLayer(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        # we use a linear layer to produce the k, q and v.
+        # we use the same dimensionality for them as the embd_dim
+        self.config = config
+        self.embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+        # must make sure that we can use several attention heads
+        assert config.embd_dim % config.n_head == 0, f"Embedding dimension {config.embd_dim} is not divisible by the number of heads {config.n_head}."
+
+        self.n_head = config.n_head
+        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+
+        # to calculate k, q and v
+        self.calc_k = nn.Linear(self.combined_embd_dim, self.combined_embd_dim)
+        self.calc_q = nn.Linear(self.combined_embd_dim, self.combined_embd_dim)
+        self.calc_v = nn.Linear(self.combined_embd_dim, self.combined_embd_dim)
+
+        # final proj before return
+        self.proj = nn.Linear(self.combined_embd_dim, self.combined_embd_dim)
+        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
+        self.proj.RESIDUAL_SCALING_INIT = 1
+
+        # register parameter for the lower triangular mask-matrix
+        self.register_buffer("bias",
+        torch.tril(torch.ones(config.block_size, config.block_size))
+        .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, combined_embd_dim
+
+        k = self.calc_k(x)
+        q = self.calc_q(x)
+        v = self.calc_v(x)
+
+        # split key, query and values into their own attention heads
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
+
+        # calculating how much the embeddings "care" about one another
+        k = k.transpose(-2, -1)
+        keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+
+        # make it impossible for embeddings to get information from embeddings that comes after
+        keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+
+        keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
+
+        # calculate updated embd_values for the embeddings based on how much information should flow between them
+        x = keyquery_matrix @ v # (B, number_heads, T, T) @ (B, number_heads, T, head_size) = (B, number_heads, T, head_size)
+        x = x.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # final proj
+        x = self.proj(x)
+
+        return x
+
+
+# class that defines a MLP
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+
+        self.proj_1 = nn.Linear(self.combined_embd_dim, 4 * self.combined_embd_dim)
+        self.act_fn = nn.GELU(approximate='tanh')
+        #self.act_fn = nn.LeakyReLU()
+        self.proj_2 = nn.Linear(self.combined_embd_dim * 4, self.combined_embd_dim)
+        # flag for weight scaling to counteract residual streams increasing variance in the forward pass
+        self.proj_2.RESIDUAL_SCALING_INIT = 1
+
+    def forward(self, x):
+        x = self.proj_1(x)
+        x = self.act_fn(x)
+        x = self.proj_2(x)
+        return x
+
+
+# class that defines a "block" in the model, it contains a layernorm to normalize activations, attention layer, MLP layer and another layernorm
+
+class Block(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+        self.ln_1 = nn.LayerNorm(self.combined_embd_dim)
+        self.attn = SelfAttentionLayer(config)
+        self.ln_2 = nn.LayerNorm(self.combined_embd_dim)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
 
 
 # model config class
 @dataclass
 class ModelConfig():
     input_dim: int = 1
+    num_input_features: int = 1 # inputs: price, volume
+    include_volume: bool = False
     batch_size: int = 4
-    block_size: int = 16
-    embd_dim: int = 16
-    n_layers: int = 8
-    n_head: int = 4
+    block_size: int = 20
+    embd_dim: int = 4
+    n_layers: int = 2
+    n_head: int = 1
     loss_fn: Literal['L1', 'MSE'] = "MSE"
+
+# Function to convert ModelConfig to a hashable type (tuple in this case)
+def config_to_tuple(config):
+    return (config.input_dim, config.num_input_features, config.batch_size, config.block_size, config.embd_dim, config.n_layers, config.n_head, config.loss_fn)
 
 # ----------------------------------------------------------------------------------------
 
@@ -679,232 +732,273 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 #init
-model_config = ModelConfig()
+model_config_price_only = ModelConfig(num_input_features=1, include_volume=False)
+model_config_price_volume = ModelConfig(num_input_features=2, include_volume=True)
 
-model = FinanceTransformer(model_config)
-model.to(device)
+model_list = []
 
-# object to track model activities
-modelObserver = ModelObserver(model)
+price_only_model = FinanceTransformer(model_config_price_only)
+model_price_and_volume = FinanceTransformer(model_config_price_volume)
 
-# get the size of the model
-num_parameters = model.calculate_parameters()
-print(f"Number of parameters in the model: {num_parameters}")
+model_list.append(price_only_model)
+model_list.append(model_price_and_volume)
 
-# define loss function and optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-
-vliser = Visualizer()
-
-# track losses and grad norms
-train_losses = []
-val_losses = []
-# used so I can compare losses between different normalization schemes
-normalized_val_losses = []
-# used to inspect training stability
-grad_norms = []
-
-# load the data into our program
-normalizer = DataNormalizer(norm_scheme="min_max")
-dataLoader = DataLoader(model_config, normalizer)
-
-# Training specification
-trainTickerList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'JPM', 'V', 'JNJ', 'QCOM', 'NVDA']
-train_data_file = "train_data.txt"
-train_startDate = '2018-08-01'
-train_endDate = '2023-08-01'
-
-# Load the train set into dataloader
-dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
-
-# Validation specification
-valTickerList = ['BABA', 'NFLX', 'PFE', 'AMD', 'NVDA', 'AAPL']
-val_data_file = "val_data.txt"
-val_startDate = '2023-08-02'
-val_endDate = '2024-07-01'
-
-# Load the validation set into dataloader
-dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
+model_stats = {}
 
 
-# how many batches between each val loss measurement
-val_interval = 50
-# record lowest val loss
-lowest_val_loss = float('inf')
-lowest_normalized_val_loss = float('inf')
-total_absolute_price_diff = 0
-
-print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
-
-epochs = 20
-
-batch_size = dataLoader.B * dataLoader.T
-
-# calculate amount of batches in one epoch
-total_batches = dataLoader.dataPerEpoch*epochs // batch_size
-
-print(f"total batches: {total_batches}")
-
-# toggle prints and plots
-prints = False
-plots = False
-
-# register hooks so modelObserver can save model state during forward and backward pass
-modelObserver.register_hooks(save_grads=True)
-
-print(f"Model config: {model_config}")
-
-# training run
-
-print("\n----- START OF TRAINING -----")
-
-with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
-
-  for i in range(total_batches):
-
-      # set the model to train mode
-      model.train()
-
-      # load batch
-      X, Y = dataLoader.next_batch()
-
-      # move batch to correct device
-      X = X.to(device)
-      Y = Y.to(device)
-
-      # get prediction
-      preds, train_loss = model(X, Y)
-
-      if train_loss is not None:
-        # reset gradients
-        optimizer.zero_grad()
-
-        # calculate gradients from loss
-        train_loss.backward()
-
-        # clipping the gradients if they get too high values
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        # update weights
-        optimizer.step()
-
-        # append the training loss
-        train_losses.append(train_loss.item())
-        grad_norms.append(norm.item())
-
-        # Update the progress bar
-        pbar.update(1)
-
-      # eval during training
-      if i % val_interval == 0:
-        model.eval()
-
-        val_loss = 0
-        # enables comparison between losses from different data normalization schemes
-        normalized_val_loss = 0
-
-        for tickerIndex in range(dataLoader.nValTickers):
-
-          # pluck out all data for ticker
-          tickerData_prices, tickerData_volumes = dataLoader.valData[tickerIndex]
-
-          # input data (excluding the last price and volume)
-          shifted_tickerData_prices = tickerData_prices[:-1]
-          shifted_tickerData_volumes = tickerData_volumes[:-1]
-
-          # targets are shifted by one timestep
-          tickerTargets = tickerData_prices[1:]
-
-          # reshape to (-1, T, 1) for model inference
-          shifted_tickerData_prices = torch.Tensor(shifted_tickerData_prices).view(-1, model_config.block_size, 1).to(device)
-          shifted_tickerData_volumes = torch.Tensor(shifted_tickerData_volumes).view(-1, model_config.block_size, 1).to(device)          
-          tickerTargets = torch.Tensor(tickerTargets).view(-1, model_config.block_size, 1).to(device)
-
-          # combine price and volume into one tensor
-          shifted_tickerData = torch.cat((shifted_tickerData_prices, shifted_tickerData_volumes), dim=2)
-          
-          # keep track of the variance of the data
-          data_variance = torch.var(tickerTargets, unbiased=False).item()
-
-          with torch.no_grad():
-            tickerPreds, val_loss_ticker = model(shifted_tickerData, tickerTargets)
-
-          # add to the overall loss
-          val_loss += val_loss_ticker
-          normalized_val_loss += (val_loss_ticker / data_variance)
+for model in model_list:
+  model.to(device)
 
 
-          # plot tickers if we are recording the last validation loss
-          if (i+val_interval) >= total_batches:
-            # reshape to 1D for plot
-            tickerPreds = tickerPreds.view(-1).cpu().numpy()
-            tickerTargets = tickerTargets.view(-1).cpu().numpy()
-
-            deNormalize_prices = True
-            if deNormalize_prices:
-              # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
-              current_ticker = valTickerList[tickerIndex]
-
-              tickerPreds = normalizer.de_normalize(current_ticker, tickerPreds)
-              tickerTargets = normalizer.de_normalize(current_ticker, tickerTargets)
-
-              element_wise_diff = tickerPreds - tickerTargets
-              absolute_diff = np.abs(element_wise_diff)
-              sum_absolute_diff = np.sum(absolute_diff)
-              total_absolute_price_diff += sum_absolute_diff
-              
-            vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
+  # object to track model activities
+  modelObserver = ModelObserver(model)
 
 
-        # calculate average loss over tickers
-        val_loss = val_loss / dataLoader.nValTickers
-        normalized_val_loss = normalized_val_loss / dataLoader.nValTickers
-        # append the test loss
-        val_losses.append(val_loss.item())
-        normalized_val_losses.append(normalized_val_loss.item())
-              
+  # get the size of the model
+  num_parameters = model.calculate_parameters()
+  print(f"Number of parameters in the model: {num_parameters}")
 
-        # check if this is lowest loss
-        if val_loss.item() < lowest_val_loss:
-          lowest_val_loss = val_loss
-        if normalized_val_loss.item() < lowest_normalized_val_loss:
-          lowest_normalized_val_loss = normalized_val_loss
+  # define loss function and optimizer
+  optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
-      # plot the preds for one ticker at a time
-      if i == (total_batches-1):
+  vliser = Visualizer()
 
-        # vliser.plot_module_activities(modelObserver)
-        # now we want to plot the variance of grads and output throughout the network
-        all_weight_grads_var = []
-        all_bias_grads_var = []
-        all_output_var = []
-        pooling = "var"
-        network_averages = modelObserver.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
-        print(f"network_averages: {network_averages}")
-        for module, averages in network_averages.items():
-          for averagename, averagevalue in averages.items():
-            if averagename == f"weights {pooling}":
-              all_weight_grads_var.append(averagevalue.cpu().item())
-            elif averagename == f"bias {pooling}":
-              all_bias_grads_var.append(averagevalue.cpu().item())
-            elif averagename == f"output {pooling}":
-              all_output_var.append(averagevalue.cpu().item())
-        vliser.plot_graph(all_weight_grads_var, "weight var from start to end of network", "module number", "weights var", padding_factor=0.5)
-        vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
-        vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
+  # track losses and grad norms
+  train_losses = []
+  val_losses = []
+  # used so I can compare losses between different normalization schemes
+  normalized_val_losses = []
+  # used to inspect training stability
+  grad_norms = []
+
+  # load the data into our program
+  normalizer = DataNormalizer(norm_scheme="min_max")
+  dataLoader = DataLoader(model.config, normalizer)
+
+  # Training specification
+  trainTickerList = ['AAPL', 'GOOGL', 'META', 'JPM', 'V', 'JNJ', 'QCOM']
+  train_data_file = "train_data.txt"
+  train_startDate = '2018-08-01'
+  train_endDate = '2020-08-01'
+
+  # Load the train set into dataloader
+  dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
+
+  # Validation specification
+  valTickerList = ['SHOP', 'ZM', 'PTON', 'COIN', 'HOOD', 'TSLA', 'BYND', 'NIO', 'GME', 'SNAP', 'DOCU', 'ROKU', 'SPCE', 'UBER']
+  val_data_file = "val_data.txt"
+  val_startDate = '2020-08-02'
+  val_endDate = '2024-07-01'
+
+  # Load the validation set into dataloader
+  dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
 
 
-print("----- END OF TRAINING -----\n")
+  # how many batches between each val loss measurement
+  val_interval = 25
+  # record lowest val loss
+  lowest_val_loss = float('inf')
+  lowest_normalized_val_loss = float('inf')
+  total_absolute_price_diff = 0
 
-modelObserver.remove_hooks()
+  print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
 
-print(f"grad norms: {grad_norms}")
-print(f"val_losses: {val_losses}")
+  epochs = 50
 
-vliser.plot_graph(grad_norms, "grad norms", "iteration", "grad norm")
-vliser.plot_graph(train_losses, "training loss", "iteration", "loss")
-vliser.plot_graph(val_losses, "val loss", "iteration", "loss")
-print(f"Lowest val loss achieved: {lowest_val_loss}")
-print(f"Lowest normalized val loss achieved: {lowest_normalized_val_loss}")
-total_absolute_price_diff = total_absolute_price_diff / dataLoader.nValTickers
-print(f"Total absolute price difference: {total_absolute_price_diff}")
+  batch_size = dataLoader.B * dataLoader.T
+
+  # calculate amount of batches in one epoch
+  total_batches = dataLoader.dataPerEpoch*epochs // batch_size
+
+  print(f"total batches: {total_batches}")
+
+  # toggle prints and plots
+  prints = False
+  plots = False
+
+  # register hooks so modelObserver can save model state during forward and backward pass
+  modelObserver.register_hooks(save_grads=True)
+
+  print(f"Model config: {model.config}")
+
+  # training run
+
+  print("\n----- START OF TRAINING -----")
+
+  with tqdm(total=(total_batches), desc=f"Training progress") as pbar:
+
+    for i in range(total_batches):
+
+        # set the model to train mode
+        model.train()
+
+        # load batch
+        X, Y = dataLoader.next_batch()
+
+        # move batch to correct device
+        X = X.to(device)
+        Y = Y.to(device)
+
+        # get prediction
+        preds, train_loss = model(X, Y)
+
+        if train_loss is not None:
+          # reset gradients
+          optimizer.zero_grad()
+
+          # calculate gradients from loss
+          train_loss.backward()
+
+          # clipping the gradients if they get too high values
+          norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+          # update weights
+          optimizer.step()
+
+          # append the training loss
+          train_losses.append(train_loss.item())
+          grad_norms.append(norm.item())
+
+          # Update the progress bar
+          pbar.update(1)
+
+        # eval during training
+        if i % val_interval == 0:
+          model.eval()
+
+          val_loss = 0
+          # enables comparison between losses from different data normalization schemes
+          normalized_val_loss = 0
+
+          for tickerIndex in range(dataLoader.nValTickers):
+
+            # pluck out all data for ticker
+            if model.config.include_volume:
+              tickerData_prices, tickerData_volumes = dataLoader.valData[tickerIndex]
+            else:
+              tickerData_prices = dataLoader.valData[tickerIndex]
+
+            # input data (excluding the last price and volume)
+            shifted_tickerData_prices = tickerData_prices[:-1]
+            if model.config.include_volume:
+              shifted_tickerData_volumes = tickerData_volumes[:-1]
+
+            # targets are shifted by one timestep
+            tickerTargets = tickerData_prices[1:]
+
+            # reshape to (-1, T, 1) for model inference
+            shifted_tickerData_prices = torch.Tensor(shifted_tickerData_prices).view(-1, model.config.block_size, 1).to(device)
+            if model.config.include_volume:
+              shifted_tickerData_volumes = torch.Tensor(shifted_tickerData_volumes).view(-1, model.config.block_size, 1).to(device)          
+            tickerTargets = torch.Tensor(tickerTargets).view(-1, model.config.block_size, 1).to(device)
+
+            # combine price and volume into one tensor
+            if model.config.include_volume:
+              shifted_tickerData = torch.cat((shifted_tickerData_prices, shifted_tickerData_volumes), dim=2)
+            else:
+              shifted_tickerData = shifted_tickerData_prices
+            
+            # keep track of the variance of the data
+            data_variance = torch.var(tickerTargets, unbiased=False).item()
+
+            with torch.no_grad():
+                tickerPreds, val_loss_ticker = model(shifted_tickerData, tickerTargets)
+
+
+            # add to the overall loss
+            val_loss += val_loss_ticker
+            normalized_val_loss += (val_loss_ticker / data_variance)
+
+
+            # plot tickers if we are recording the last validation loss
+            if (i+val_interval) >= total_batches:
+              # reshape to 1D for plot
+              tickerPreds = tickerPreds.view(-1).cpu().numpy()
+              tickerTargets = tickerTargets.view(-1).cpu().numpy()
+
+              deNormalize_prices = True
+              if deNormalize_prices:
+                # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
+                current_ticker = valTickerList[tickerIndex]
+
+                tickerPreds = normalizer.de_normalize(current_ticker, tickerPreds)
+                tickerTargets = normalizer.de_normalize(current_ticker, tickerTargets)
+
+                element_wise_diff = tickerPreds - tickerTargets
+                absolute_diff = np.abs(element_wise_diff)
+                sum_absolute_diff = np.sum(absolute_diff)
+                total_absolute_price_diff += sum_absolute_diff
+                
+              vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
+
+
+          # calculate average loss over tickers
+          val_loss = val_loss / dataLoader.nValTickers
+          normalized_val_loss = normalized_val_loss / dataLoader.nValTickers
+          # append the test loss
+          val_losses.append(val_loss.item())
+          normalized_val_losses.append(normalized_val_loss.item())
+                
+
+          # check if this is lowest loss
+          if val_loss.item() < lowest_val_loss:
+            lowest_val_loss = val_loss
+          if normalized_val_loss.item() < lowest_normalized_val_loss:
+            lowest_normalized_val_loss = normalized_val_loss
+
+        # plot the preds for one ticker at a time
+        if i == (total_batches-1):
+
+          # vliser.plot_module_activities(modelObserver)
+          # now we want to plot the variance of grads and output throughout the network
+          all_weight_grads_var = []
+          all_bias_grads_var = []
+          all_output_var = []
+          pooling = "var"
+          network_averages = modelObserver.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
+          print(f"network_averages: {network_averages}")
+          for module, averages in network_averages.items():
+            for averagename, averagevalue in averages.items():
+              if averagename == f"weights {pooling}":
+                all_weight_grads_var.append(averagevalue.cpu().item())
+              elif averagename == f"bias {pooling}":
+                all_bias_grads_var.append(averagevalue.cpu().item())
+              elif averagename == f"output {pooling}":
+                all_output_var.append(averagevalue.cpu().item())
+          vliser.plot_graph(all_weight_grads_var, "weight var from start to end of network", "module number", "weights var", padding_factor=0.5)
+          vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
+          vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
+
+
+  print("----- END OF TRAINING -----\n")
+
+  modelObserver.remove_hooks()
+
+  # Store statistics for this model using its configuration as a key
+  model_stats[config_to_tuple(model.config)] = {
+      "grad_norms": grad_norms,
+      "train_losses": train_losses,
+      "val_losses": val_losses,
+      "normalized_val_losses": normalized_val_losses,
+      "lowest_val_loss": lowest_val_loss,
+      "lowest_normalized_val_loss": lowest_normalized_val_loss,
+      "total_absolute_price_diff": total_absolute_price_diff
+  }
+
+# Print model statistics
+for model_config, stats in model_stats.items():
+    print(f"Model Config: {model_config}")
+    print(f"grad norms: {stats['grad_norms']}")
+    print(f"val_losses: {stats['val_losses']}")
+
+    vliser.plot_graph(stats['grad_norms'], "grad norms", "iteration", "grad norm")
+    vliser.plot_graph(stats['train_losses'], "training loss", "iteration", "loss")
+    total_absolute_price_diff = stats['total_absolute_price_diff'] / dataLoader.nValTickers
+    print(f"Total absolute price difference: {total_absolute_price_diff}")
+
+for model_config, stats in model_stats.items():
+    vliser.plot_graph(stats["val_losses"], "val loss", "iteration", "loss")
+    print(f"Lowest val loss achieved: {stats['lowest_val_loss']}")
+    print(f"Lowest normalized val loss achieved: {stats['lowest_normalized_val_loss']}")
+
+
