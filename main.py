@@ -183,7 +183,7 @@ class DataNormalizer():
         # save the mean and std for the ticker
         self.tickers_mean_std[tickername] = (mean_price, std_price)
       elif split == "val":
-        # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data 
+        # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data
         # we use this period's mean and std when normalizing the val ticker's prices)
         if self.trainStartDate is None or self.trainEndDate is None:
           raise ValueError("Training period not set. Cannot normalize val data.")
@@ -208,7 +208,7 @@ class DataNormalizer():
       mean_price, std_price = self.tickers_mean_std[tickername]
       original_prices = (normalized_prices * std_price) + mean_price
       return original_prices
-    
+
 
   # Function to normalize the prices using percentage change
   def percentage_normalize(self, tickername, prices, split="train"):
@@ -228,7 +228,7 @@ class DataNormalizer():
 
       # Denormalize prices
       original_prices = normalized_prices * self.initial_prices[tickername]
-      
+
       return original_prices
 
 
@@ -258,145 +258,220 @@ class DataNormalizer():
       return original_prices
 
 
-# dataloader class
-class DataLoader():
 
-  def __init__(self, model_config, normalizer):
-    self.B = model_config.batch_size
-    self.T = model_config.block_size
-    self.include_volume = model_config.include_volume
-    # this holds the complete training data
-    self.trainData = []
-    # this holds the complete val data
-    self.valData = []
-    self.currentPosition = 0
-    # this is annoying but we need it to prevent input -> target mapping from
-    # last price of one ticker to first price of next ticker
-    self.currentTicker = 0
-    self.nTrainTickers = 0
-    self.nValTickers = 0
-    # state to keep track of epochs in training
-    self.dataPerEpoch = 0
-    # initialize normalizer
-    self.normalizer = normalizer
+class DataLoader:
+    def __init__(self, model_config, normalizer):
+        self.normalizer = normalizer
+        self.B = model_config.batch_size
+        self.T = model_config.block_size
+        self.input_features = model_config.input_features
 
+        # store train and val data
+        self.train_data = {}  # Initialize train_data as empty dict
+        self.val_data = {}  # Initialize val_data as empty dict
 
-  def load_data_from_yfinance(self, tickerList, filepath, startDate, endDate, split="train"):
-      # keep track of training period to use for z-normalizing test prices later
-      if split == "train":
-          self.normalizer.trainStartDate = startDate
-          self.normalizer.trainEndDate = endDate
+        # state to load batches of train data
+        self.current_ticker = None
+        self.current_position = 0
 
-      with open(filepath, 'w') as file:
-          for ticker in tickerList:
-              # download data from Yahoo Finance
-              data = yf.download(ticker, start=startDate, end=endDate)
-              if data.empty:
-                raise ValueError(f"No data found for ticker {ticker} between {startDate} and {startDate}.")
+        # attribute to track the total amount of rows in train_data
+        self.dataPerEpoch = 0
 
-              prices = data['Close'].values
+    # Function to download price and volume data from Yahoo Finance
+    def download_price_volume_data(self, ticker, start_date, end_date, split):
+        # Download the price and volume data
+        data = yf.download(ticker, start=start_date, end=end_date)
 
-              # normalize prices
-              normalized_prices = self.normalizer.normalize(ticker, prices, split)
+        # Get the outstanding shares
+        key_figures = yf.Ticker(ticker)
+        outstanding_shares = key_figures.info['sharesOutstanding']
 
-              if self.include_volume:
-                # adding volumes for my model to analyze as well
-                volumes = data['Volume'].values
-                key_figures = yf.Ticker(ticker)
-                # Get the outstanding shares
-                outstanding_shares = key_figures.info['sharesOutstanding']
+        # Normalize volumes
+        data['NormalizedVolume'] = data['Volume'] / outstanding_shares
 
-                # normalize volumes
-                normalized_volumes = volumes / outstanding_shares
-
-                print(f"len of prices and volume equal? {len(normalized_prices) == len(normalized_volumes)}")
-
-              # popping prices if they dont modulo with my model block_size
-              # subtracting one because inputs and targets will have len - 1 elements
-              if split == "train":
-                pop_elements = (len(normalized_prices)-1) % (self.T*self.B)
-              # we don't care about batch size if we load in test set data, we only care about block size
-              elif split == "val":
-                pop_elements = (len(normalized_prices)-1) % self.T
-
-              print(f"\npopping {pop_elements} prices and volumes from ticker {ticker} when loading data into dataloader")
-              if pop_elements != 0:
-                normalized_prices = normalized_prices[:-pop_elements]
-                if self.include_volume:
-                  normalized_volumes = normalized_volumes[:-pop_elements]
-
-              # write prices to file, file's purpose is for me to look at and sanity check
-              file.write(f"--- Ticker: {ticker} ---\n")
-                            
-              if self.include_volume:
-                for price, volume in zip(normalized_prices, normalized_volumes):
-                    file.write(f"'p': {price}, v: {volume}\n")
-              else:
-                for price in normalized_prices:
-                  file.write(f"'p': {price}\n")
-
-              # add ticker prices to self.data, increment self.nTickers and update self.dataPerEpoch
-              if split == "train":
-                if self.include_volume:
-                  self.trainData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
-                else:
-                  self.trainData.append(normalized_prices.tolist())
-
-                self.nTrainTickers += 1
-                self.dataPerEpoch += len(normalized_prices) - 1
-
-              elif split == "val":
-                if self.include_volume:
-                  self.valData.append((normalized_prices.tolist(), normalized_volumes.tolist()))
-                else:
-                  self.valData.append(normalized_prices.tolist())
-                self.nValTickers += 1
+        # Return the Close price and Normalized Volume columns with Date
+        return data[['Close', 'NormalizedVolume']].reset_index()
 
 
+    # Function to fetch and process earnings data from Alpha Vantage
+    def fetch_and_process_eps_data(self, ticker):
+        url = f'https://www.alphavantage.co/query?function=EARNINGS&symbol={ticker}&apikey={api_key}'
+        response = requests.get(url)
+        eps_data = response.json().get("quarterlyEarnings", [])
+        for record in eps_data:
+            for key in ['estimatedEPS', 'surprise', 'surprisePercentage', 'reportTime']:
+                record.pop(key, None)
 
-  def next_batch(self):
+        eps_df = pd.DataFrame(eps_data)
+        eps_df['reportedDate'] = pd.to_datetime(eps_df['reportedDate'])
+        eps_df = eps_df.sort_values(by='reportedDate')
+        return eps_df
 
-    # pluck out next batch
-    if self.include_volume:
-      ticker_prices, inp_volumes = self.trainData[self.currentTicker]
 
-    else:
-      ticker_prices = self.trainData[self.currentTicker]
+    # Function to combine price, volume and earnings data
+    def combine_price_and_eps_data(self, ticker, start_date, end_date, split):
+        price_data = self.download_price_volume_data(ticker, start_date, end_date, split)
+        eps_data = self.fetch_and_process_eps_data(ticker)
 
-    batch_prices = ticker_prices[self.currentPosition : self.currentPosition + self.B * self.T]
+        merged_data = pd.merge_asof(
+            price_data,
+            eps_data,
+            left_on='Date',
+            right_on='reportedDate',
+            direction='backward'
+        )
 
-    if self.include_volume:
-      batch_volumes = inp_volumes[self.currentPosition : self.currentPosition + self.B * self.T]
+        # Rename columns
+        merged_data.rename(
+            columns={
+                'reportedEPS': 'latest_eps',
+                'fiscalDateEnding': 'eps_fiscalDate',
+                'reportedDate': 'eps_reportedDate'
+            },
+            inplace=True
+        )
 
-    batch_targets = ticker_prices[self.currentPosition + 1 : self.currentPosition + (self.B * self.T) + 1]
+        # Convert latest_eps to numeric
+        merged_data['latest_eps'] = pd.to_numeric(merged_data['latest_eps'], errors='coerce')
 
-    # convert to tensors and reshape, also add extra dim so shape becomes [B, T, 1]
-    batch_prices = torch.Tensor(batch_prices).view(self.B, self.T, 1)
-    if self.include_volume:
-      batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
+        # Calculate inverse P/E ratio and add as a new column
+        merged_data['inverse P/E'] = (merged_data['latest_eps'] * 4) / merged_data['Close']
 
-    batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
+        # Normalize prices
+        merged_data['Close'] = self.normalizer.normalize(ticker, merged_data['Close'].values, split)
 
-    # combine price and volume into one tensor
-    if self.include_volume:
-      batch_inputs = torch.cat((batch_prices, batch_volumes), dim=2)
-    else:
-      batch_inputs = batch_prices
 
-    # update pointer
-    self.currentPosition += self.B * self.T
+        # Determine how many rows to drop based on the split type
+        if split == "train":
+            pop_elements = (len(merged_data) - 1) % (self.T * self.B)
+        elif split == "val":
+            pop_elements = (len(merged_data) - 1) % self.T
 
-    # if next batch is out of bounds reset pointer
-    if self.currentPosition + self.B * self.T + 1 > len(ticker_prices):
-      self.currentPosition = 0
-      # if we are at the last ticker go to first ticker again
-      if self.currentTicker == (self.nTrainTickers - 1):
-        self.currentTicker = 0
-      # else go to next ticker
-      else:
-        self.currentTicker += 1
+        # Drop the last `pop_elements` rows from the DataFrame
+        if pop_elements > 0:
+            merged_data = merged_data[:-pop_elements]
 
-    return batch_inputs, batch_targets
+        # Update the dataPerEpoch attribute
+        if split == "train":
+            self.dataPerEpoch += len(merged_data) - 1
+
+
+        # Reorder columns if necessary
+        columns_order = ['Date', 'Close', 'NormalizedVolume', 'inverse P/E', 'latest_eps', 'eps_fiscalDate', 'eps_reportedDate']
+        merged_data = merged_data[columns_order]
+
+        return merged_data
+
+
+    # this method downloads all ticker data and return a dictionary of dataframe where each dataframe holds the data for one ticker
+    def download_tickers_data(self, ticker_list, start_date, end_date, split):
+
+        # keep track of training period to use for z-normalizing test prices later
+        if split == "train":
+          self.normalizer.trainStartDate = start_date
+          self.normalizer.trainEndDate = end_date
+
+        # Loop through each ticker and process data
+        for ticker in ticker_list:
+            merged_data = self.combine_price_and_eps_data(ticker, start_date, end_date, split)
+            if split == "train":
+                self.train_data[ticker] = merged_data  # Add DataFrame to train dictionary
+            elif split == "val":
+                self.val_data[ticker] = merged_data  # Add DataFrame to val dictionary
+
+            print(f"Data for {ticker} written to {ticker}_{split}_data.csv")
+            merged_data.to_csv(f"{ticker}_{split}_data.csv", index=False)
+
+        # Initialize current ticker and position
+        self.current_ticker = list(self.train_data.keys())[0]
+        self.current_position = 0
+
+
+    def next_batch(self):
+        # Pluck out next batch
+        ticker_data = self.train_data[self.current_ticker]
+        batch_inputs = []
+        batch_targets = ticker_data['Close'].values[self.current_position + 1:self.current_position + (self.B * self.T) + 1]
+        batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
+
+        # Include price in inputs if specified
+        if "price" in self.input_features:
+            batch_prices = ticker_data['Close'].values[self.current_position:self.current_position + self.B * self.T]
+            batch_prices = torch.Tensor(batch_prices).view(self.B, self.T, 1)
+            batch_inputs.append(batch_prices)
+
+        # Include volume in inputs if specified
+        if "volume" in self.input_features:
+            batch_volumes = ticker_data['NormalizedVolume'].values[self.current_position:self.current_position + self.B * self.T]
+            batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
+            batch_inputs.append(batch_volumes)
+
+        # Include inverse P/E in inputs if specified
+        if "inverse p/e" in self.input_features:
+            batch_inverse_pe = ticker_data['inverse P/E'].values[self.current_position:self.current_position + self.B * self.T]
+            batch_inverse_pe = torch.Tensor(batch_inverse_pe).view(self.B, self.T, 1)
+            batch_inputs.append(batch_inverse_pe)
+
+        # Combine features into one tensor if both are present
+        if len(batch_inputs) > 1:
+            batch_inputs = torch.cat(batch_inputs, dim=2)
+        else:
+            batch_inputs = batch_inputs[0]  # Only one feature, so no need to concatenate
+
+        # Update the pointer
+        self.current_position += self.B * self.T
+
+        # If next batch is out of bounds, reset pointer
+        if self.current_position + self.B * self.T + 1 > len(ticker_data):
+            self.current_position = 0
+            # If we are at the last ticker, go to the first ticker again
+            tickers = list(self.train_data.keys())
+            current_ticker_index = tickers.index(self.current_ticker)
+            if current_ticker_index == len(tickers) - 1:
+                self.current_ticker = tickers[0]
+            else:
+                self.current_ticker = tickers[current_ticker_index + 1]
+
+        return batch_inputs, batch_targets
+
+
+    # Method to get validation data for a specific ticker
+    def get_validation_data(self, ticker):
+        # Fetch validation data for the ticker
+        if ticker not in self.val_data:
+            raise ValueError(f"No validation data found for ticker {ticker}")
+
+        ticker_data = self.val_data[ticker]
+        inputs_list = []
+
+        # Include price in inputs if specified
+        if "price" in self.input_features:
+            val_prices = ticker_data['Close'].values[:-1]
+            inputs_prices = torch.Tensor(val_prices).view(-1, self.T, 1)
+            inputs_list.append(inputs_prices)
+
+        # Include volume in inputs if specified
+        if "volume" in self.input_features:
+            val_volumes = ticker_data['NormalizedVolume'].values[:-1]
+            inputs_volumes = torch.Tensor(val_volumes).view(-1, self.T, 1)
+            inputs_list.append(inputs_volumes)
+
+        # Include inverse P/E in inputs if specified
+        if "inverse p/e" in self.input_features:
+            val_inverse_pe = ticker_data['inverse P/E'].values[:-1]
+            inputs_inverse_pe = torch.Tensor(val_inverse_pe).view(-1, self.T, 1)
+            inputs_list.append(inputs_inverse_pe)
+
+        val_targets = ticker_data['Close'].values[1:]
+        targets = torch.Tensor(val_targets).view(-1, self.T, 1)
+
+        # Combine features into one tensor if both are present
+        if len(inputs_list) > 1:
+            inputs = torch.cat(inputs_list, dim=2)
+        else:
+            inputs = inputs_list[0]  # Only one feature, so no need to concatenate
+
+        return inputs, targets
 
 
 
@@ -515,13 +590,18 @@ class FinanceTransformer(nn.Module):
         self.config = config
         assert config.block_size is not None
         self.block_size = config.block_size
+        self.num_input_features = len(config.input_features)
+
+        # input embeddings
         self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        if config.include_volume:
-          self.volume_embeddings = nn.Linear(config.input_dim, config.embd_dim)
-        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim * config.num_input_features)
+        self.volume_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.inverse_pe_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim * self.num_input_features)
+
+        # layers
         self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
-        self.final_normlayer = nn.LayerNorm(config.embd_dim * config.num_input_features)
-        self.predictionlayer = nn.Linear(config.embd_dim * config.num_input_features, 1)
+        self.final_normlayer = nn.LayerNorm(config.embd_dim * self.num_input_features)
+        self.predictionlayer = nn.Linear(config.embd_dim * self.num_input_features, 1)
 
         # Apply custom weight initialization
         self.apply(self.custom_weight_init)
@@ -554,44 +634,55 @@ class FinanceTransformer(nn.Module):
             # plot_heatmap(module.weight.data.cpu().numpy(), f'Scaled weights for {module}')
 
 
+
     def forward(self, idx, targets=None):
-        # idx: (batch_size, block_size, 2) where 2 represents price and volume features
+        # idx: (batch_size, block_size, F) where F represents the number of features
 
         _, T, F = idx.size()
 
         assert T <= self.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
-        # assert F == self.config.num_input_features, f"Cannot forward sequence of incorrect amount of input features, got: {F} expected: {self.config.num_input_features}"
+        assert F == len(self.config.input_features), f"Expected {len(self.config.input_features)} input features, but got {F}"
 
+        # Initialize an empty list to hold the embeddings
+        embeddings = []
 
-        # Extract price and volume data, each will be of shape (batch_size, block_size, 1)
-        price_data = idx[:, :, 0].unsqueeze(-1)  # (batch_size, block_size, 1)
-        if self.config.include_volume:
-          volume_data = idx[:, :, 1].unsqueeze(-1)  # (batch_size, block_size, 1)
+        # Embed price data if it's present in the input features
+        if "price" in self.config.input_features:
+            price_index = self.config.input_features.index("price")
+            price_data = idx[:, :, price_index].unsqueeze(-1)  # (batch_size, block_size, 1)
+            price_emb = self.price_embeddings(price_data)  # (batch_size, block_size, embd_dim)
+            embeddings.append(price_emb)
 
-        # Embed price and volume data
-        price_emb = self.price_embeddings(price_data)  # (batch_size, block_size, embd_dim)
-        if self.config.include_volume:
-         volume_emb = self.volume_embeddings(volume_data)  # (batch_size, block_size, embd_dim)
+        # Embed volume data if it's present in the input features
+        if "volume" in self.config.input_features:
+            volume_index = self.config.input_features.index("volume")
+            volume_data = idx[:, :, volume_index].unsqueeze(-1)  # (batch_size, block_size, 1)
+            volume_emb = self.volume_embeddings(volume_data)  # (batch_size, block_size, embd_dim)
+            embeddings.append(volume_emb)
 
-        # Concatenate price and volume embeddings along the last dimension
-        if self.config.include_volume:
-          x = torch.cat((price_emb, volume_emb), dim=-1)  # (batch_size, block_size, embd_dim * 2)
-        else:
-          x = price_emb
+        # Embed inverse P/E data if it's present in the input features
+        if "inverse p/e" in self.config.input_features:
+            inverse_pe_index = self.config.input_features.index("inverse p/e")
+            inverse_pe_data = idx[:, :, inverse_pe_index].unsqueeze(-1)  # (batch_size, block_size, 1)
+            inverse_pe_emb = self.inverse_pe_embeddings(inverse_pe_data)  # (batch_size, block_size, embd_dim)
+            embeddings.append(inverse_pe_emb)
+
+        # Concatenate all embeddings along the last dimension
+        x = torch.cat(embeddings, dim=-1)  # (batch_size, block_size, embd_dim * num_features)
 
         # Generate positional encodings for the sequence length T
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # Positional encoding
         pos_emb = self.position_embeddings(pos)
 
         # Add positional encodings to the concatenated embeddings
-        x = x + pos_emb  # (batch_size, block_size, embd_dim * 2)
+        x = x + pos_emb  # (batch_size, block_size, embd_dim * num_features)
 
         # Pass the concatenated embeddings through the transformer blocks
         for i, block in enumerate(self.layers):
-            x = block(x)  # (batch_size, block_size, embd_dim * 2)
+            x = block(x)  # (batch_size, block_size, embd_dim * num_features)
 
         # Apply the final layer normalization
-        x = self.final_normlayer(x)  # (batch_size, block_size, embd_dim * 2)
+        x = self.final_normlayer(x)  # (batch_size, block_size, embd_dim * num_features)
 
         # Predict and compute loss if targets are provided
         if targets is not None:
@@ -608,20 +699,21 @@ class FinanceTransformer(nn.Module):
         return preds, loss
 
 
+
+
 # class that defines the self attention layers
 class SelfAttentionLayer(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         # we use a linear layer to produce the k, q and v.
-        # we use the same dimensionality for them as the embd_dim
-        self.config = config
-        self.embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
-        # must make sure that we can use several attention heads
-        assert config.embd_dim % config.n_head == 0, f"Embedding dimension {config.embd_dim} is not divisible by the number of heads {config.n_head}."
-
+        # we use the same dimensionality for them as the embd_dim * num_input_features
+        self.num_input_features = len(config.input_features)
+        self.combined_embd_dim = config.embd_dim * self.num_input_features  # updated to account for concatenated embeddings
         self.n_head = config.n_head
-        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+
+        # must make sure that we can use several attention heads
+        assert self.combined_embd_dim % config.n_head == 0, f"Embedding dimension {config.embd_dim} is not divisible by the number of heads {config.n_head}."
 
         # to calculate k, q and v
         self.calc_k = nn.Linear(self.combined_embd_dim, self.combined_embd_dim)
@@ -674,7 +766,8 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+        self.num_input_features = len(config.input_features)
+        self.combined_embd_dim = config.embd_dim * self.num_input_features  # updated to account for concatenated embeddings
 
         self.proj_1 = nn.Linear(self.combined_embd_dim, 4 * self.combined_embd_dim)
         self.act_fn = nn.GELU(approximate='tanh')
@@ -696,7 +789,8 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.combined_embd_dim = config.embd_dim * config.num_input_features  # updated to account for concatenated embeddings
+        self.num_input_features = len(config.input_features)
+        self.combined_embd_dim = config.embd_dim * self.num_input_features  # updated to account for concatenated embeddings
         self.ln_1 = nn.LayerNorm(self.combined_embd_dim)
         self.attn = SelfAttentionLayer(config)
         self.ln_2 = nn.LayerNorm(self.combined_embd_dim)
@@ -712,8 +806,7 @@ class Block(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    num_input_features: int = 1 # inputs: price, volume
-    include_volume: bool = False
+    input_features: list = field(default_factory=lambda: ["price", "volume", "inverse p/e"])  # Use default_factory for mutable default
     batch_size: int = 4
     block_size: int = 20
     embd_dim: int = 4
@@ -721,9 +814,18 @@ class ModelConfig():
     n_head: int = 1
     loss_fn: Literal['L1', 'MSE'] = "MSE"
 
-# Function to convert ModelConfig to a hashable type (tuple in this case)
 def config_to_tuple(config):
-    return (config.input_dim, config.num_input_features, config.batch_size, config.block_size, config.embd_dim, config.n_layers, config.n_head, config.loss_fn)
+    # Convert the ModelConfig object to a tuple, converting lists to tuples
+    return (
+        config.input_dim,
+        tuple(config.input_features),  # Convert list to tuple
+        config.batch_size,
+        config.block_size,
+        config.embd_dim,
+        config.n_layers,
+        config.n_head,
+        config.loss_fn
+    )
 
 # ----------------------------------------------------------------------------------------
 
@@ -732,16 +834,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 #init
-model_config_price_only = ModelConfig(num_input_features=1, include_volume=False)
-model_config_price_volume = ModelConfig(num_input_features=2, include_volume=True)
+model_config_price_only = ModelConfig(input_features = ["price"])
+model_config_price_volume = ModelConfig(input_features = ["price", "volume"])
 
 model_list = []
 
 price_only_model = FinanceTransformer(model_config_price_only)
 model_price_and_volume = FinanceTransformer(model_config_price_volume)
 
-model_list.append(price_only_model)
+
 model_list.append(model_price_and_volume)
+model_list.append(price_only_model)
 
 model_stats = {}
 
@@ -749,10 +852,8 @@ model_stats = {}
 for model in model_list:
   model.to(device)
 
-
   # object to track model activities
   modelObserver = ModelObserver(model)
-
 
   # get the size of the model
   num_parameters = model.calculate_parameters()
@@ -771,27 +872,28 @@ for model in model_list:
   # used to inspect training stability
   grad_norms = []
 
-  # load the data into our program
+  # prepare train and val data
+  train_ticker_list = ["AAPL", "IBM"]
+  train_start_date = "2023-07-30"
+  train_end_date = "2024-07-30"
+
+  val_ticker_list = ["MSFT", "GOOG"]
+  val_start_date = "2023-07-30"
+  val_end_date = "2024-07-30"
+
+  # api key for fetching data from Alpha Vantage
+  api_key = userdata.get('ALPHA_VANTAGE_API_KEY')
+
+  # Instantiate the DataNormalizer class
   normalizer = DataNormalizer(norm_scheme="min_max")
-  dataLoader = DataLoader(model.config, normalizer)
 
-  # Training specification
-  trainTickerList = ['AAPL', 'GOOGL', 'META', 'JPM', 'V', 'JNJ', 'QCOM']
-  train_data_file = "train_data.txt"
-  train_startDate = '2018-08-01'
-  train_endDate = '2020-08-01'
+  # Instantiate the DataLoader class
+  data_loader = DataLoader(model.config, normalizer)
 
-  # Load the train set into dataloader
-  dataLoader.load_data_from_yfinance(trainTickerList, train_data_file, startDate=train_startDate, endDate=train_endDate, split="train")
+  # Process the ticker list
+  data_loader.download_tickers_data(train_ticker_list, train_start_date, train_end_date, split="train")
 
-  # Validation specification
-  valTickerList = ['SHOP', 'ZM', 'PTON', 'COIN', 'HOOD', 'TSLA', 'BYND', 'NIO', 'GME', 'SNAP', 'DOCU', 'ROKU', 'SPCE', 'UBER']
-  val_data_file = "val_data.txt"
-  val_startDate = '2020-08-02'
-  val_endDate = '2024-07-01'
-
-  # Load the validation set into dataloader
-  dataLoader.load_data_from_yfinance(valTickerList, val_data_file, startDate=val_startDate, endDate=val_endDate, split="val")
+  data_loader.download_tickers_data(val_ticker_list, val_start_date, val_end_date, split="val")
 
 
   # how many batches between each val loss measurement
@@ -801,14 +903,14 @@ for model in model_list:
   lowest_normalized_val_loss = float('inf')
   total_absolute_price_diff = 0
 
-  print(f"dataloader.dataPerEpoch: {dataLoader.dataPerEpoch}")
+  print(f"dataloader.dataPerEpoch: {data_loader.dataPerEpoch}")
 
   epochs = 50
 
-  batch_size = dataLoader.B * dataLoader.T
+  batch_size = data_loader.B * data_loader.T
 
   # calculate amount of batches in one epoch
-  total_batches = dataLoader.dataPerEpoch*epochs // batch_size
+  total_batches = data_loader.dataPerEpoch*epochs // batch_size
 
   print(f"total batches: {total_batches}")
 
@@ -833,7 +935,7 @@ for model in model_list:
         model.train()
 
         # load batch
-        X, Y = dataLoader.next_batch()
+        X, Y = data_loader.next_batch()
 
         # move batch to correct device
         X = X.to(device)
@@ -870,40 +972,21 @@ for model in model_list:
           # enables comparison between losses from different data normalization schemes
           normalized_val_loss = 0
 
-          for tickerIndex in range(dataLoader.nValTickers):
+          for ticker in data_loader.val_data.keys():
 
-            # pluck out all data for ticker
-            if model.config.include_volume:
-              tickerData_prices, tickerData_volumes = dataLoader.valData[tickerIndex]
-            else:
-              tickerData_prices = dataLoader.valData[tickerIndex]
-
-            # input data (excluding the last price and volume)
-            shifted_tickerData_prices = tickerData_prices[:-1]
-            if model.config.include_volume:
-              shifted_tickerData_volumes = tickerData_volumes[:-1]
-
-            # targets are shifted by one timestep
-            tickerTargets = tickerData_prices[1:]
-
-            # reshape to (-1, T, 1) for model inference
-            shifted_tickerData_prices = torch.Tensor(shifted_tickerData_prices).view(-1, model.config.block_size, 1).to(device)
-            if model.config.include_volume:
-              shifted_tickerData_volumes = torch.Tensor(shifted_tickerData_volumes).view(-1, model.config.block_size, 1).to(device)          
-            tickerTargets = torch.Tensor(tickerTargets).view(-1, model.config.block_size, 1).to(device)
-
-            # combine price and volume into one tensor
-            if model.config.include_volume:
-              shifted_tickerData = torch.cat((shifted_tickerData_prices, shifted_tickerData_volumes), dim=2)
-            else:
-              shifted_tickerData = shifted_tickerData_prices
+            # Fetch validation inputs and targets using the new method
+            inputs, targets = data_loader.get_validation_data(ticker)
             
-            # keep track of the variance of the data
-            data_variance = torch.var(tickerTargets, unbiased=False).item()
+            # Move data to the appropriate device
+            inputs = inputs.to(device)
+            targets = targets.to(device)
 
+            # Keep track of the variance of the data
+            data_variance = torch.var(targets, unbiased=False).item()
+
+            # Perform model inference
             with torch.no_grad():
-                tickerPreds, val_loss_ticker = model(shifted_tickerData, tickerTargets)
-
+                preds, val_loss_ticker = model(inputs, targets)
 
             # add to the overall loss
             val_loss += val_loss_ticker
@@ -913,32 +996,30 @@ for model in model_list:
             # plot tickers if we are recording the last validation loss
             if (i+val_interval) >= total_batches:
               # reshape to 1D for plot
-              tickerPreds = tickerPreds.view(-1).cpu().numpy()
-              tickerTargets = tickerTargets.view(-1).cpu().numpy()
+              preds = preds.view(-1).cpu().numpy()
+              targets = targets.view(-1).cpu().numpy()
 
               deNormalize_prices = True
               if deNormalize_prices:
                 # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
-                current_ticker = valTickerList[tickerIndex]
+                preds = normalizer.de_normalize(ticker, preds)
+                targets = normalizer.de_normalize(ticker, targets)
 
-                tickerPreds = normalizer.de_normalize(current_ticker, tickerPreds)
-                tickerTargets = normalizer.de_normalize(current_ticker, tickerTargets)
-
-                element_wise_diff = tickerPreds - tickerTargets
+                element_wise_diff = preds - targets
                 absolute_diff = np.abs(element_wise_diff)
                 sum_absolute_diff = np.sum(absolute_diff)
                 total_absolute_price_diff += sum_absolute_diff
-                
-              vliser.plot_preds(actual_prices=tickerTargets, preds=tickerPreds, title=f"Val Ticker: {valTickerList[tickerIndex]}, period: {val_startDate} to {val_endDate}, processed {int((i / total_batches)*100)}% of training data", width=16)
+
+              vliser.plot_preds(actual_prices=targets, preds=preds, title=f"Val Ticker: {ticker}, period: {val_start_date} to {val_end_date}, processed {int((i / total_batches)*100)}% of training data", width=16)
 
 
           # calculate average loss over tickers
-          val_loss = val_loss / dataLoader.nValTickers
-          normalized_val_loss = normalized_val_loss / dataLoader.nValTickers
+          val_loss = val_loss / len(data_loader.val_data)
+          normalized_val_loss = normalized_val_loss / len(data_loader.val_data)
           # append the test loss
           val_losses.append(val_loss.item())
           normalized_val_losses.append(normalized_val_loss.item())
-                
+
 
           # check if this is lowest loss
           if val_loss.item() < lowest_val_loss:
@@ -993,12 +1074,12 @@ for model_config, stats in model_stats.items():
 
     vliser.plot_graph(stats['grad_norms'], "grad norms", "iteration", "grad norm")
     vliser.plot_graph(stats['train_losses'], "training loss", "iteration", "loss")
-    total_absolute_price_diff = stats['total_absolute_price_diff'] / dataLoader.nValTickers
+    total_absolute_price_diff = stats['total_absolute_price_diff']
     print(f"Total absolute price difference: {total_absolute_price_diff}")
 
 for model_config, stats in model_stats.items():
     vliser.plot_graph(stats["val_losses"], "val loss", "iteration", "loss")
     print(f"Lowest val loss achieved: {stats['lowest_val_loss']}")
-    print(f"Lowest normalized val loss achieved: {stats['lowest_normalized_val_loss']}")
+    print(f"Lowest normalized val loss achieved for {model_config}: {stats['lowest_normalized_val_loss']}")
 
 
