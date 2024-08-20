@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
 import torch.nn.functional as F
 import yfinance as yf
 import pandas as pd
@@ -10,6 +9,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from typing import Literal
+import requests
+from google.colab import userdata
+from dataclasses import dataclass, field
 
 # Function to plot heatmap for weights
 def plot_heatmap(ax, data, module, module_name, activity):
@@ -144,118 +146,133 @@ class Visualizer():
 # normalizer class capable of using 2 different normalization schemes. Z-normalization as well as percentage-normalization
 class DataNormalizer():
 
-  def __init__(self, norm_scheme):
-      self.norm_scheme = norm_scheme
-      # dictionary to save mean and std for each ticker for z-denormalization
-      self.tickers_mean_std = {}
-      # dictionary to save initial prices for each ticker for percentage-denormalization
-      self.initial_prices = {}
-      # state to keep track of training period so we use consistent z-normalization of train and val set
-      self.trainStartDate = None
-      self.trainEndDate = None
+    def __init__(self, norm_scheme):
+        self.norm_scheme = norm_scheme
+        # dictionary to save mean and std for each ticker for z-denormalization
+        self.tickers_mean_std = {}
+        # dictionary to save initial prices for each ticker for percentage-denormalization
+        self.initial_prices = {}
+        # state to keep track of training period so we use consistent z-normalization of train and val set
+        self.trainStartDate = None
+        self.trainEndDate = None
+        # nested dictionary to store min and max values by ticker and feature type
+        self.tickers_min_max = {}
 
-      self.tickers_min_max = {}
+    def normalize(self, tickername, data, feature_type, split):
+        if self.norm_scheme == "z":
+            return self.z_normalize(tickername, data, split)
+        elif self.norm_scheme == "percentage":
+            return self.percentage_normalize(tickername, data, split)
+        elif self.norm_scheme == "min_max":
+            return self.min_max_normalize(tickername, data, feature_type, split)
 
-  def normalize(self, tickername, prices, split):
-    if self.norm_scheme == "z":
-      return self.z_normalize(tickername, prices, split)
-    elif self.norm_scheme == "percentage":
-      return self.percentage_normalize(tickername, prices, split)
-    elif self.norm_scheme == "min_max":
-      return self.min_max_normalize(tickername, prices, split)
-
-
-  def de_normalize(self, tickername, normalized_prices):
-    if self.norm_scheme == "z":
-      return self.z_denormalize(tickername, normalized_prices)
-    elif self.norm_scheme == "percentage":
-      return self.percentage_denormalize(tickername, normalized_prices)
-    elif self.norm_scheme == "min_max":
-      return self.min_max_denormalize(tickername, normalized_prices)
+    def de_normalize(self, tickername, normalized_data, feature_type):
+        if self.norm_scheme == "z":
+            return self.z_denormalize(tickername, normalized_data)
+        elif self.norm_scheme == "percentage":
+            return self.percentage_denormalize(tickername, normalized_data)
+        elif self.norm_scheme == "min_max":
+            return self.min_max_denormalize(tickername, normalized_data, feature_type)
 
 
-  # Function to normalize the prices using z-normalization
-  def z_normalize(self, tickername, prices, split="train"):
-      # use the mean and std of train set to normalize train and val set
-      if split == "train":
-        mean_price = np.mean(prices)
-        std_price = np.std(prices)
-        # save the mean and std for the ticker
-        self.tickers_mean_std[tickername] = (mean_price, std_price)
-      elif split == "val":
-        # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data
-        # we use this period's mean and std when normalizing the val ticker's prices)
-        if self.trainStartDate is None or self.trainEndDate is None:
-          raise ValueError("Training period not set. Cannot normalize val data.")
-        if tickername not in self.tickers_mean_std:
-          data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
-          prices_for_mean_and_std = data['Close'].values
-          mean_price = np.mean(prices_for_mean_and_std)
-          std_price = np.std(prices_for_mean_and_std)
+    # Function to normalize the prices using z-normalization
+    def z_normalize(self, tickername, prices, split="train"):
+        # use the mean and std of train set to normalize train and val set
+        if split == "train":
+          mean_price = np.mean(prices)
+          std_price = np.std(prices)
           # save the mean and std for the ticker
           self.tickers_mean_std[tickername] = (mean_price, std_price)
-        else:
-          mean_price, std_price = self.tickers_mean_std[tickername]
+        elif split == "val":
+          # we use the training period to normalize the val set's prices (for example if we trained on 2010-2015 data
+          # we use this period's mean and std when normalizing the val ticker's prices)
+          if self.trainStartDate is None or self.trainEndDate is None:
+            raise ValueError("Training period not set. Cannot normalize val data.")
+          if tickername not in self.tickers_mean_std:
+            data = yf.download(tickername, self.trainStartDate, self.trainEndDate)
+            prices_for_mean_and_std = data['Close'].values
+            mean_price = np.mean(prices_for_mean_and_std)
+            std_price = np.std(prices_for_mean_and_std)
+            # save the mean and std for the ticker
+            self.tickers_mean_std[tickername] = (mean_price, std_price)
+          else:
+            mean_price, std_price = self.tickers_mean_std[tickername]
 
-      normalized_prices = (prices - mean_price) / std_price
-      return normalized_prices
-
-
-  # Function to reverse the z-normalization
-  def z_denormalize(self, tickername, normalized_prices):
-      if tickername not in self.tickers_mean_std:
-          raise ValueError(f"Statistics for ticker {tickername} not found.")
-      mean_price, std_price = self.tickers_mean_std[tickername]
-      original_prices = (normalized_prices * std_price) + mean_price
-      return original_prices
-
-
-  # Function to normalize the prices using percentage change
-  def percentage_normalize(self, tickername, prices, split="train"):
-
-      self.initial_prices[tickername] = prices[0]
-
-      # Normalize each price by the first price
-      normalized_prices = prices / prices[0]
-      normalized_prices = np.log(normalized_prices)
-
-      return normalized_prices
-
-  def percentage_denormalize(self, tickername, normalized_prices):
-      if tickername not in self.initial_prices:
-          raise ValueError(f"Initial price for ticker {tickername} not found.")
-      normalized_prices = np.exp(normalized_prices)
-
-      # Denormalize prices
-      original_prices = normalized_prices * self.initial_prices[tickername]
-
-      return original_prices
+        normalized_prices = (prices - mean_price) / std_price
+        return normalized_prices
 
 
-  # Function to normalize the prices using min-max scaling
-  def min_max_normalize(self, tickername, prices, split="train"):
-      if split == "train":
-          min_price = np.min(prices)
-          max_price = np.max(prices)
-          # save the min and max for the ticker
-          self.tickers_min_max[tickername] = (min_price, max_price)
-      elif split == "val":
-          min_price = np.min(prices)
-          max_price = np.max(prices)
-          # min_price, max_price = self.tickers_min_max[tickername]
-          self.tickers_min_max[tickername] = (min_price, max_price)
-
-      normalized_prices = 2 * (prices - min_price) / (max_price - min_price) - 1
-      return normalized_prices
+    # Function to reverse the z-normalization
+    def z_denormalize(self, tickername, normalized_prices):
+        if tickername not in self.tickers_mean_std:
+            raise ValueError(f"Statistics for ticker {tickername} not found.")
+        mean_price, std_price = self.tickers_mean_std[tickername]
+        original_prices = (normalized_prices * std_price) + mean_price
+        return original_prices
 
 
-  # Function to reverse the min-max normalization
-  def min_max_denormalize(self, tickername, normalized_prices):
-      if tickername not in self.tickers_min_max:
-          raise ValueError(f"Min and max for ticker {tickername} not found.")
-      min_price, max_price = self.tickers_min_max[tickername]
-      original_prices = (normalized_prices + 1) / 2 * (max_price - min_price) + min_price
-      return original_prices
+    # Function to normalize the prices using percentage change
+    def percentage_normalize(self, tickername, prices, split="train"):
+
+        self.initial_prices[tickername] = prices[0]
+
+        # Normalize each price by the first price
+        normalized_prices = prices / prices[0]
+        normalized_prices = np.log(normalized_prices)
+
+        return normalized_prices
+
+    def percentage_denormalize(self, tickername, normalized_prices):
+        if tickername not in self.initial_prices:
+            raise ValueError(f"Initial price for ticker {tickername} not found.")
+        normalized_prices = np.exp(normalized_prices)
+
+        # Denormalize prices
+        original_prices = normalized_prices * self.initial_prices[tickername]
+
+        return original_prices
+
+
+    # Function to normalize using min-max scaling
+    def min_max_normalize(self, tickername, data, feature_type, split="train"):
+        if split == "train":
+            min_val = np.min(data)
+            max_val = np.max(data)
+            # below is some code that may become important if i change validation set normalization but useless for now
+            # initialize the dictionary for this ticker if not already done
+            if tickername not in self.tickers_min_max:
+                self.tickers_min_max[tickername] = {}
+            # save the min and max for the ticker and feature type
+            self.tickers_min_max[tickername][feature_type] = (min_val, max_val)
+        elif split == "val":
+            min_val = np.min(data)
+            max_val = np.max(data)
+
+            if tickername not in self.tickers_min_max:
+                self.tickers_min_max[tickername] = {}
+            # save the min and max for the ticker and feature type
+            self.tickers_min_max[tickername][feature_type] = (min_val, max_val)
+
+            # will uncomment if I change normalization
+            '''
+            if tickername not in self.tickers_min_max:
+              raise ValueError(f"Training statistics for ticker {tickername} not found.")
+            min_price, max_price = self.tickers_min_max[tickername]
+            else:
+                raise ValueError(f"Invalid split value: {split}")
+            '''
+
+        # Apply min-max normalization
+        normalized_data = 2 * (data - min_val) / (max_val - min_val) - 1
+        return normalized_data
+
+    # Function to reverse the min-max normalization
+    def min_max_denormalize(self, tickername, normalized_data, feature_type):
+        if tickername not in self.tickers_min_max or feature_type not in self.tickers_min_max[tickername]:
+            raise ValueError(f"Min and max for {feature_type} of ticker {tickername} not found.")
+        min_val, max_val = self.tickers_min_max[tickername][feature_type]
+        original_data = (normalized_data + 1) / 2 * (max_val - min_val) + min_val
+        return original_data
 
 
 
@@ -278,9 +295,16 @@ class DataLoader:
         self.dataPerEpoch = 0
 
     # Function to download price and volume data from Yahoo Finance
-    def download_price_volume_data(self, ticker, start_date, end_date, split):
+    def download_yahoo_finance_data(self, ticker, start_date, end_date, split):
         # Download the price and volume data
         data = yf.download(ticker, start=start_date, end=end_date)
+
+        # Download the S&P 500 data
+        sp500_data = yf.download("^GSPC", start=start_date, end=end_date)
+        sp500_data.rename(columns={'Close': 'S&P 500 Close'}, inplace=True)
+
+        # Merge the S&P 500 data with the ticker data on the Date
+        data = data.merge(sp500_data[['S&P 500 Close']], left_index=True, right_index=True)
 
         # Get the outstanding shares
         key_figures = yf.Ticker(ticker)
@@ -289,12 +313,12 @@ class DataLoader:
         # Normalize volumes
         data['NormalizedVolume'] = data['Volume'] / outstanding_shares
 
-        # Return the Close price and Normalized Volume columns with Date
-        return data[['Close', 'NormalizedVolume']].reset_index()
+        # Return the Close price, Normalized Volume, and S&P 500 Close columns with Date
+        return data[['Close', 'NormalizedVolume', 'S&P 500 Close']].reset_index()
 
 
     # Function to fetch and process earnings data from Alpha Vantage
-    def fetch_and_process_eps_data(self, ticker):
+    def download_eps_data(self, ticker):
         url = f'https://www.alphavantage.co/query?function=EARNINGS&symbol={ticker}&apikey={api_key}'
         response = requests.get(url)
         eps_data = response.json().get("quarterlyEarnings", [])
@@ -310,8 +334,8 @@ class DataLoader:
 
     # Function to combine price, volume and earnings data
     def combine_price_and_eps_data(self, ticker, start_date, end_date, split):
-        price_data = self.download_price_volume_data(ticker, start_date, end_date, split)
-        eps_data = self.fetch_and_process_eps_data(ticker)
+        price_data = self.download_yahoo_finance_data(ticker, start_date, end_date, split)
+        eps_data = self.download_eps_data(ticker)
 
         merged_data = pd.merge_asof(
             price_data,
@@ -338,7 +362,16 @@ class DataLoader:
         merged_data['inverse P/E'] = (merged_data['latest_eps'] * 4) / merged_data['Close']
 
         # Normalize prices
-        merged_data['Close'] = self.normalizer.normalize(ticker, merged_data['Close'].values, split)
+        merged_data['Close'] = self.normalizer.normalize(ticker, merged_data['Close'].values, 'price', split)
+
+        # Normalize volume
+        merged_data['NormalizedVolume'] = self.normalizer.normalize(ticker, merged_data['NormalizedVolume'].values, 'volume', split)
+
+        # Normalize inverse P/E ratio
+        merged_data['inverse P/E'] = self.normalizer.normalize(ticker, merged_data['inverse P/E'].values, 'inverse P/E', split)
+
+        # Normalize S&P 500 Close prices
+        merged_data['S&P 500 Close'] = self.normalizer.normalize(ticker, merged_data['S&P 500 Close'].values, 'S&P 500', split)
 
 
         # Determine how many rows to drop based on the split type
@@ -357,7 +390,7 @@ class DataLoader:
 
 
         # Reorder columns if necessary
-        columns_order = ['Date', 'Close', 'NormalizedVolume', 'inverse P/E', 'latest_eps', 'eps_fiscalDate', 'eps_reportedDate']
+        columns_order = ['Date', 'Close', 'NormalizedVolume', 'inverse P/E', 'S&P 500 Close', 'latest_eps', 'eps_fiscalDate', 'eps_reportedDate']
         merged_data = merged_data[columns_order]
 
         return merged_data
@@ -391,6 +424,10 @@ class DataLoader:
         # Pluck out next batch
         ticker_data = self.train_data[self.current_ticker]
         batch_inputs = []
+        
+        start_idx = self.current_position
+        end_idx = self.current_position + self.B * self.T
+
         batch_targets = ticker_data['Close'].values[self.current_position + 1:self.current_position + (self.B * self.T) + 1]
         batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
 
@@ -412,7 +449,13 @@ class DataLoader:
             batch_inverse_pe = torch.Tensor(batch_inverse_pe).view(self.B, self.T, 1)
             batch_inputs.append(batch_inverse_pe)
 
-        # Combine features into one tensor if both are present
+        # Include S&P 500 price in inputs if specified
+        if "s&p 500" in self.input_features:
+            batch_sp_500 = ticker_data['S&P 500 Close'].values[self.current_position:self.current_position + self.B * self.T]
+            batch_sp_500 = torch.Tensor(batch_sp_500).view(self.B, self.T, 1)
+            batch_inputs.append(batch_sp_500)
+
+        # Combine features into one tensor if multiple are present
         if len(batch_inputs) > 1:
             batch_inputs = torch.cat(batch_inputs, dim=2)
         else:
@@ -461,6 +504,12 @@ class DataLoader:
             val_inverse_pe = ticker_data['inverse P/E'].values[:-1]
             inputs_inverse_pe = torch.Tensor(val_inverse_pe).view(-1, self.T, 1)
             inputs_list.append(inputs_inverse_pe)
+
+        # Include inverse P/E in inputs if specified
+        if "s&p 500" in self.input_features:
+            val_sp_500 = ticker_data['S&P 500 Close'].values[:-1]
+            inputs_sp_500 = torch.Tensor(val_sp_500).view(-1, self.T, 1)
+            inputs_list.append(inputs_sp_500)
 
         val_targets = ticker_data['Close'].values[1:]
         targets = torch.Tensor(val_targets).view(-1, self.T, 1)
@@ -596,6 +645,8 @@ class FinanceTransformer(nn.Module):
         self.price_embeddings = nn.Linear(config.input_dim, config.embd_dim)
         self.volume_embeddings = nn.Linear(config.input_dim, config.embd_dim)
         self.inverse_pe_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+        self.sp_500_embeddings = nn.Linear(config.input_dim, config.embd_dim)
+
         self.position_embeddings = nn.Embedding(config.block_size, config.embd_dim * self.num_input_features)
 
         # layers
@@ -666,6 +717,13 @@ class FinanceTransformer(nn.Module):
             inverse_pe_data = idx[:, :, inverse_pe_index].unsqueeze(-1)  # (batch_size, block_size, 1)
             inverse_pe_emb = self.inverse_pe_embeddings(inverse_pe_data)  # (batch_size, block_size, embd_dim)
             embeddings.append(inverse_pe_emb)
+
+          # Embed inverse P/E data if it's present in the input features
+        if "s&p 500" in self.config.input_features:
+            sp_500_index = self.config.input_features.index("s&p 500")
+            sp_500_data = idx[:, :, sp_500_index].unsqueeze(-1)  # (batch_size, block_size, 1)
+            sp_500_emb = self.sp_500_embeddings(sp_500_data)  # (batch_size, block_size, embd_dim)
+            embeddings.append(sp_500_emb)
 
         # Concatenate all embeddings along the last dimension
         x = torch.cat(embeddings, dim=-1)  # (batch_size, block_size, embd_dim * num_features)
@@ -806,12 +864,12 @@ class Block(nn.Module):
 @dataclass
 class ModelConfig():
     input_dim: int = 1
-    input_features: list = field(default_factory=lambda: ["price", "volume", "inverse p/e"])  # Use default_factory for mutable default
+    input_features: list = field(default_factory=lambda: ["price", "volume", "inverse p/e", "s&p 500"])
     batch_size: int = 4
-    block_size: int = 20
-    embd_dim: int = 4
-    n_layers: int = 2
-    n_head: int = 1
+    block_size: int = 64  # Reduce block size to focus on shorter sequences
+    embd_dim: int = 64  # Reduce embedding dimension to simplify the model
+    n_layers: int = 16  # Reduce the number of layers for shallower learning
+    n_head: int = 8  # Reduce the number of attention heads for simpler attention mechanism
     loss_fn: Literal['L1', 'MSE'] = "MSE"
 
 def config_to_tuple(config):
@@ -834,17 +892,23 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 #init
-model_config_price_only = ModelConfig(input_features = ["price"])
+model_config_price = ModelConfig(input_features = ["price"])
 model_config_price_volume = ModelConfig(input_features = ["price", "volume"])
+model_config_price_volume_inverse_pe = ModelConfig(input_features = ["price", "volume", "inverse p/e"])
+model_config_price_volume_inverse_pe_sp_500 = ModelConfig(input_features = ["price", "volume", "inverse p/e", "s&p 500"])
 
 model_list = []
 
-price_only_model = FinanceTransformer(model_config_price_only)
-model_price_and_volume = FinanceTransformer(model_config_price_volume)
+model_price = FinanceTransformer(model_config_price)
+model_price_volume = FinanceTransformer(model_config_price_volume)
+model_price_volume_inverse_pe = FinanceTransformer(model_config_price_volume_inverse_pe)
+model_price_volume_inverse_pe_sp_500 = FinanceTransformer(model_config_price_volume_inverse_pe_sp_500)
 
 
-model_list.append(model_price_and_volume)
-model_list.append(price_only_model)
+model_list.append(model_price)
+model_list.append(model_price_volume)
+model_list.append(model_price_volume_inverse_pe)
+model_list.append(model_price_volume_inverse_pe_sp_500)
 
 model_stats = {}
 
@@ -860,7 +924,7 @@ for model in model_list:
   print(f"Number of parameters in the model: {num_parameters}")
 
   # define loss function and optimizer
-  optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+  optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
   vliser = Visualizer()
 
@@ -872,14 +936,14 @@ for model in model_list:
   # used to inspect training stability
   grad_norms = []
 
-  # prepare train and val data
-  train_ticker_list = ["AAPL", "IBM"]
-  train_start_date = "2023-07-30"
-  train_end_date = "2024-07-30"
+  # Updated training and validation sets
+  train_ticker_list = ['TSLA', 'CVX', 'UNH', 'NKE', 'GOOGL', 'JPM', 'KO']
+  train_start_date = "2018-01-01"
+  train_end_date = "2023-01-01"
 
-  val_ticker_list = ["MSFT", "GOOG"]
-  val_start_date = "2023-07-30"
-  val_end_date = "2024-07-30"
+  val_ticker_list = ['META', 'X', 'NFLX', 'CVS', 'ORCL', 'BA', 'DIS', 'MMM', 'CAT', 'ADBE']
+  val_start_date = "2023-01-01"
+  val_end_date = "2024-04-01"
 
   # api key for fetching data from Alpha Vantage
   api_key = userdata.get('ALPHA_VANTAGE_API_KEY')
@@ -905,7 +969,7 @@ for model in model_list:
 
   print(f"dataloader.dataPerEpoch: {data_loader.dataPerEpoch}")
 
-  epochs = 50
+  epochs = 40
 
   batch_size = data_loader.B * data_loader.T
 
@@ -976,7 +1040,7 @@ for model in model_list:
 
             # Fetch validation inputs and targets using the new method
             inputs, targets = data_loader.get_validation_data(ticker)
-            
+
             # Move data to the appropriate device
             inputs = inputs.to(device)
             targets = targets.to(device)
@@ -1002,15 +1066,15 @@ for model in model_list:
               deNormalize_prices = True
               if deNormalize_prices:
                 # call the dataloaders denormalize() function to reverse normalization for model preds and targets of current ticker
-                preds = normalizer.de_normalize(ticker, preds)
-                targets = normalizer.de_normalize(ticker, targets)
+                preds = normalizer.de_normalize(ticker, preds, "price")
+                targets = normalizer.de_normalize(ticker, targets, "price")
 
                 element_wise_diff = preds - targets
                 absolute_diff = np.abs(element_wise_diff)
                 sum_absolute_diff = np.sum(absolute_diff)
                 total_absolute_price_diff += sum_absolute_diff
 
-              vliser.plot_preds(actual_prices=targets, preds=preds, title=f"Val Ticker: {ticker}, period: {val_start_date} to {val_end_date}, processed {int((i / total_batches)*100)}% of training data", width=16)
+              vliser.plot_preds(actual_prices=targets, preds=preds, title=f"Val Ticker: {ticker}, period: {val_start_date} to {val_end_date}, processed {int((i / total_batches)*100)}% of training data, inputs: {model.config.input_features}", width=16)
 
 
           # calculate average loss over tickers
@@ -1029,8 +1093,8 @@ for model in model_list:
 
         # plot the preds for one ticker at a time
         if i == (total_batches-1):
-
-          # vliser.plot_module_activities(modelObserver)
+          # if model.config.input_features == ["price", "volume", "inverse p/e"]:
+            # vliser.plot_module_activities(modelObserver)
           # now we want to plot the variance of grads and output throughout the network
           all_weight_grads_var = []
           all_bias_grads_var = []
@@ -1075,7 +1139,7 @@ for model_config, stats in model_stats.items():
     vliser.plot_graph(stats['grad_norms'], "grad norms", "iteration", "grad norm")
     vliser.plot_graph(stats['train_losses'], "training loss", "iteration", "loss")
     total_absolute_price_diff = stats['total_absolute_price_diff']
-    print(f"Total absolute price difference: {total_absolute_price_diff}")
+    print(f"Total absolute price difference for {model_config}: {total_absolute_price_diff}")
 
 for model_config, stats in model_stats.items():
     vliser.plot_graph(stats["val_losses"], "val loss", "iteration", "loss")
