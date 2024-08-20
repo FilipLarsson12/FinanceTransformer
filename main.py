@@ -299,22 +299,25 @@ class DataLoader:
         # Download the price and volume data
         data = yf.download(ticker, start=start_date, end=end_date)
 
+        # Rename the Close column to price
+        data.rename(columns={'Close': 'price'}, inplace=True)
+
         # Download the S&P 500 data
         sp500_data = yf.download("^GSPC", start=start_date, end=end_date)
-        sp500_data.rename(columns={'Close': 'S&P 500 Close'}, inplace=True)
+        sp500_data.rename(columns={'Close': 's&p 500'}, inplace=True)
 
         # Merge the S&P 500 data with the ticker data on the Date
-        data = data.merge(sp500_data[['S&P 500 Close']], left_index=True, right_index=True)
+        data = data.merge(sp500_data[['s&p 500']], left_index=True, right_index=True)
 
         # Get the outstanding shares
         key_figures = yf.Ticker(ticker)
         outstanding_shares = key_figures.info['sharesOutstanding']
 
         # Normalize volumes
-        data['NormalizedVolume'] = data['Volume'] / outstanding_shares
+        data['volume'] = data['Volume'] / outstanding_shares
 
         # Return the Close price, Normalized Volume, and S&P 500 Close columns with Date
-        return data[['Close', 'NormalizedVolume', 'S&P 500 Close']].reset_index()
+        return data[['price', 'volume', 's&p 500']].reset_index()
 
 
     # Function to fetch and process earnings data from Alpha Vantage
@@ -359,21 +362,20 @@ class DataLoader:
         merged_data['latest_eps'] = pd.to_numeric(merged_data['latest_eps'], errors='coerce')
 
         # Calculate inverse P/E ratio and add as a new column
-        merged_data['inverse P/E'] = (merged_data['latest_eps'] * 4) / merged_data['Close']
+        merged_data['inverse p/e'] = (merged_data['latest_eps'] * 4) / merged_data['price']
 
         # Normalize prices
-        merged_data['Close'] = self.normalizer.normalize(ticker, merged_data['Close'].values, 'price', split)
+        merged_data['price'] = self.normalizer.normalize(ticker, merged_data['price'].values, 'price', split)
 
         # Normalize volume
-        merged_data['NormalizedVolume'] = self.normalizer.normalize(ticker, merged_data['NormalizedVolume'].values, 'volume', split)
+        merged_data['volume'] = self.normalizer.normalize(ticker, merged_data['volume'].values, 'volume', split)
 
         # Normalize inverse P/E ratio
-        merged_data['inverse P/E'] = self.normalizer.normalize(ticker, merged_data['inverse P/E'].values, 'inverse P/E', split)
+        merged_data['inverse p/e'] = self.normalizer.normalize(ticker, merged_data['inverse p/e'].values, 'inverse p/e', split)
 
         # Normalize S&P 500 Close prices
-        merged_data['S&P 500 Close'] = self.normalizer.normalize(ticker, merged_data['S&P 500 Close'].values, 'S&P 500', split)
-
-
+        merged_data['s&p 500'] = self.normalizer.normalize(ticker, merged_data['s&p 500'].values, 's&p 500', split)
+        
         # Determine how many rows to drop based on the split type
         if split == "train":
             pop_elements = (len(merged_data) - 1) % (self.T * self.B)
@@ -390,7 +392,7 @@ class DataLoader:
 
 
         # Reorder columns if necessary
-        columns_order = ['Date', 'Close', 'NormalizedVolume', 'inverse P/E', 'S&P 500 Close', 'latest_eps', 'eps_fiscalDate', 'eps_reportedDate']
+        columns_order = ['Date', 'price', 'volume', 'inverse p/e', 's&p 500', 'latest_eps', 'eps_fiscalDate', 'eps_reportedDate']
         merged_data = merged_data[columns_order]
 
         return merged_data
@@ -419,41 +421,33 @@ class DataLoader:
         self.current_ticker = list(self.train_data.keys())[0]
         self.current_position = 0
 
+    
+    def get_feature_tensor(self, ticker_data, feature_name, start_idx, end_idx):
+        """
+        Helper method to fetch and transform a specific feature from the data.
+        """
+        feature_values = ticker_data[feature_name].values[start_idx:end_idx]
+        feature_tensor = torch.Tensor(feature_values).view(self.B, self.T, 1)
+
+        return feature_tensor
+
 
     def next_batch(self):
         # Pluck out next batch
         ticker_data = self.train_data[self.current_ticker]
         batch_inputs = []
-        
+
         start_idx = self.current_position
         end_idx = self.current_position + self.B * self.T
 
-        batch_targets = ticker_data['Close'].values[self.current_position + 1:self.current_position + (self.B * self.T) + 1]
+        batch_targets = ticker_data['price'].values[start_idx + 1:end_idx + 1]
         batch_targets = torch.Tensor(batch_targets).view(self.B, self.T, 1)
 
-        # Include price in inputs if specified
-        if "price" in self.input_features:
-            batch_prices = ticker_data['Close'].values[self.current_position:self.current_position + self.B * self.T]
-            batch_prices = torch.Tensor(batch_prices).view(self.B, self.T, 1)
-            batch_inputs.append(batch_prices)
+        # Fetch feature tensors only for features specified in config
+        for feature_name in self.input_features:
+            feature_tensor = self.get_feature_tensor(ticker_data, feature_name, start_idx, end_idx)
+            batch_inputs.append(feature_tensor)
 
-        # Include volume in inputs if specified
-        if "volume" in self.input_features:
-            batch_volumes = ticker_data['NormalizedVolume'].values[self.current_position:self.current_position + self.B * self.T]
-            batch_volumes = torch.Tensor(batch_volumes).view(self.B, self.T, 1)
-            batch_inputs.append(batch_volumes)
-
-        # Include inverse P/E in inputs if specified
-        if "inverse p/e" in self.input_features:
-            batch_inverse_pe = ticker_data['inverse P/E'].values[self.current_position:self.current_position + self.B * self.T]
-            batch_inverse_pe = torch.Tensor(batch_inverse_pe).view(self.B, self.T, 1)
-            batch_inputs.append(batch_inverse_pe)
-
-        # Include S&P 500 price in inputs if specified
-        if "s&p 500" in self.input_features:
-            batch_sp_500 = ticker_data['S&P 500 Close'].values[self.current_position:self.current_position + self.B * self.T]
-            batch_sp_500 = torch.Tensor(batch_sp_500).view(self.B, self.T, 1)
-            batch_inputs.append(batch_sp_500)
 
         # Combine features into one tensor if multiple are present
         if len(batch_inputs) > 1:
@@ -489,29 +483,29 @@ class DataLoader:
 
         # Include price in inputs if specified
         if "price" in self.input_features:
-            val_prices = ticker_data['Close'].values[:-1]
+            val_prices = ticker_data['price'].values[:-1]
             inputs_prices = torch.Tensor(val_prices).view(-1, self.T, 1)
             inputs_list.append(inputs_prices)
 
         # Include volume in inputs if specified
         if "volume" in self.input_features:
-            val_volumes = ticker_data['NormalizedVolume'].values[:-1]
+            val_volumes = ticker_data['volume'].values[:-1]
             inputs_volumes = torch.Tensor(val_volumes).view(-1, self.T, 1)
             inputs_list.append(inputs_volumes)
 
         # Include inverse P/E in inputs if specified
         if "inverse p/e" in self.input_features:
-            val_inverse_pe = ticker_data['inverse P/E'].values[:-1]
+            val_inverse_pe = ticker_data['inverse p/e'].values[:-1]
             inputs_inverse_pe = torch.Tensor(val_inverse_pe).view(-1, self.T, 1)
             inputs_list.append(inputs_inverse_pe)
 
         # Include inverse P/E in inputs if specified
         if "s&p 500" in self.input_features:
-            val_sp_500 = ticker_data['S&P 500 Close'].values[:-1]
+            val_sp_500 = ticker_data['s&p 500'].values[:-1]
             inputs_sp_500 = torch.Tensor(val_sp_500).view(-1, self.T, 1)
             inputs_list.append(inputs_sp_500)
 
-        val_targets = ticker_data['Close'].values[1:]
+        val_targets = ticker_data['price'].values[1:]
         targets = torch.Tensor(val_targets).view(-1, self.T, 1)
 
         # Combine features into one tensor if both are present
