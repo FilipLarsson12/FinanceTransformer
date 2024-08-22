@@ -822,6 +822,7 @@ class Block(nn.Module):
 # model config class
 @dataclass
 class ModelConfig():
+    model_name: str
     input_dim: int = 1
     input_features: list = field(default_factory=lambda: ["price", "volume", "inverse p/e", "s&p 500"])
     batch_size: int = 4
@@ -850,11 +851,12 @@ def config_to_tuple(config):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-#init
-model_config_price = ModelConfig(input_features = ["price"])
-model_config_price_volume = ModelConfig(input_features = ["price", "volume"])
-model_config_price_volume_inverse_pe = ModelConfig(input_features = ["price", "volume", "inverse p/e"])
-model_config_price_volume_inverse_pe_sp_500 = ModelConfig(input_features = ["price", "volume", "inverse p/e", "s&p 500"])
+# init models
+model_config_price = ModelConfig(model_name="Model_Price", input_features=["price"])
+model_config_price_volume = ModelConfig(model_name="Model_Price_Volume", input_features=["price", "volume"])
+model_config_price_volume_inverse_pe = ModelConfig(model_name="Model_Price_Volume_Inverse_PE", input_features=["price", "volume", "inverse p/e"])
+model_config_price_volume_inverse_pe_sp_500 = ModelConfig(model_name="Model_Price_Volume_Inverse_PE_SP500", input_features=["price", "volume", "inverse p/e", "s&p 500"])
+
 
 model_list = []
 
@@ -869,7 +871,24 @@ model_list.append(model_price_volume)
 model_list.append(model_price_volume_inverse_pe)
 model_list.append(model_price_volume_inverse_pe_sp_500)
 
+# used to save stats for each model for comparison
 model_stats = {}
+
+
+# Updated training and validation sets
+train_ticker_list = ['TSLA', 'CVX', 'UNH', 'NKE', 'GOOGL', 'JPM', 'KO']
+train_start_date = "2018-01-01"
+train_end_date = "2023-01-01"
+
+val_ticker_list = ['META', 'X', 'NFLX', 'CVS', 'ORCL', 'BA', 'DIS', 'MMM', 'CAT', 'ADBE']
+val_start_date = "2023-01-01"
+val_end_date = "2024-04-01"
+
+# api key for fetching data from Alpha Vantage
+api_key = userdata.get('ALPHA_VANTAGE_API_KEY')
+
+# used for visualizing model activity and model output
+vliser = Visualizer()
 
 
 for model in model_list:
@@ -885,8 +904,6 @@ for model in model_list:
   # define loss function and optimizer
   optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
-  vliser = Visualizer()
-
   # track losses and grad norms
   train_losses = []
   val_losses = []
@@ -894,18 +911,6 @@ for model in model_list:
   normalized_val_losses = []
   # used to inspect training stability
   grad_norms = []
-
-  # Updated training and validation sets
-  train_ticker_list = ['TSLA', 'CVX', 'UNH', 'NKE', 'GOOGL', 'JPM', 'KO']
-  train_start_date = "2018-01-01"
-  train_end_date = "2023-01-01"
-
-  val_ticker_list = ['META', 'X', 'NFLX', 'CVS', 'ORCL', 'BA', 'DIS', 'MMM', 'CAT', 'ADBE']
-  val_start_date = "2023-01-01"
-  val_end_date = "2024-04-01"
-
-  # api key for fetching data from Alpha Vantage
-  api_key = userdata.get('ALPHA_VANTAGE_API_KEY')
 
   # Instantiate the DataNormalizer class
   normalizer = DataNormalizer(norm_scheme="min_max")
@@ -937,12 +942,15 @@ for model in model_list:
 
   print(f"total batches: {total_batches}")
 
-  # toggle prints and plots
+  # toggle prints, plots and hooks
   prints = False
   plots = False
+  hooks = False
+
 
   # register hooks so modelObserver can save model state during forward and backward pass
-  modelObserver.register_hooks(save_grads=True)
+  if hooks:
+    modelObserver.register_hooks(save_grads=True)
 
   print(f"Model config: {model.config}")
 
@@ -1016,8 +1024,8 @@ for model in model_list:
             normalized_val_loss += (val_loss_ticker / data_variance)
 
 
-            # plot tickers if we are recording the last validation loss
-            if (i+val_interval) >= total_batches:
+            # plot tickers if we are at the last batch
+            if i == (total_batches-1):
               # reshape to 1D for plot
               preds = preds.view(-1).cpu().numpy()
               targets = targets.view(-1).cpu().numpy()
@@ -1033,6 +1041,7 @@ for model in model_list:
                 sum_absolute_diff = np.sum(absolute_diff)
                 total_absolute_price_diff += sum_absolute_diff
 
+              # vliser.plot_module_activities(modelObserver)
               vliser.plot_preds(actual_prices=targets, preds=preds, title=f"Val Ticker: {ticker}, period: {val_start_date} to {val_end_date}, processed {int((i / total_batches)*100)}% of training data, inputs: {model.config.input_features}", width=16)
 
 
@@ -1050,36 +1059,13 @@ for model in model_list:
           if normalized_val_loss.item() < lowest_normalized_val_loss:
             lowest_normalized_val_loss = normalized_val_loss
 
-        # plot the preds for one ticker at a time
-        if i == (total_batches-1):
-          # if model.config.input_features == ["price", "volume", "inverse p/e"]:
-            # vliser.plot_module_activities(modelObserver)
-          # now we want to plot the variance of grads and output throughout the network
-          all_weight_grads_var = []
-          all_bias_grads_var = []
-          all_output_var = []
-          pooling = "var"
-          network_averages = modelObserver.compute_module_statistics(['weights', 'bias', 'output'], pooling=pooling)
-          print(f"network_averages: {network_averages}")
-          for module, averages in network_averages.items():
-            for averagename, averagevalue in averages.items():
-              if averagename == f"weights {pooling}":
-                all_weight_grads_var.append(averagevalue.cpu().item())
-              elif averagename == f"bias {pooling}":
-                all_bias_grads_var.append(averagevalue.cpu().item())
-              elif averagename == f"output {pooling}":
-                all_output_var.append(averagevalue.cpu().item())
-          vliser.plot_graph(all_weight_grads_var, "weight var from start to end of network", "module number", "weights var", padding_factor=0.5)
-          vliser.plot_graph(all_bias_grads_var, "bias var from start to end of network", "module number", "bias var", padding_factor=0.5)
-          vliser.plot_graph(all_output_var, "output var from start to end of network", "module number", "output var", padding_factor=0.5)
-
-
   print("----- END OF TRAINING -----\n")
 
-  modelObserver.remove_hooks()
+  if hooks:
+    modelObserver.remove_hooks()
 
   # Store statistics for this model using its configuration as a key
-  model_stats[config_to_tuple(model.config)] = {
+  model_stats[model.config.model_name] = {
       "grad_norms": grad_norms,
       "train_losses": train_losses,
       "val_losses": val_losses,
@@ -1090,19 +1076,12 @@ for model in model_list:
   }
 
 # Print model statistics
-for model_config, stats in model_stats.items():
-    print(f"Model Config: {model_config}")
-    print(f"grad norms: {stats['grad_norms']}")
-    print(f"val_losses: {stats['val_losses']}")
+for model_name, stats in model_stats.items():
+    print(f"Model Name: {model_name}")
+    
+    vliser.plot_graph(stats["val_losses"], f"val loss for {model_name}", "iteration", "loss")
 
-    vliser.plot_graph(stats['grad_norms'], "grad norms", "iteration", "grad norm")
-    vliser.plot_graph(stats['train_losses'], "training loss", "iteration", "loss")
+    print(f"Lowest normalized val loss achieved for {model_name}: {stats['lowest_normalized_val_loss']}")
+    # vliser.plot_graph(stats['grad_norms'], f"grad norms for {model_name}", "iteration", "grad norm")
     total_absolute_price_diff = stats['total_absolute_price_diff']
-    print(f"Total absolute price difference for {model_config}: {total_absolute_price_diff}")
-
-for model_config, stats in model_stats.items():
-    vliser.plot_graph(stats["val_losses"], "val loss", "iteration", "loss")
-    print(f"Lowest val loss achieved: {stats['lowest_val_loss']}")
-    print(f"Lowest normalized val loss achieved for {model_config}: {stats['lowest_normalized_val_loss']}")
-
-
+    print(f"Total absolute price difference for {model_name}: {total_absolute_price_diff}")
