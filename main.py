@@ -12,6 +12,8 @@ from typing import Literal
 import requests
 from google.colab import userdata
 from dataclasses import dataclass, field
+import time
+
 
 # Function to plot heatmap for weights
 def plot_heatmap(ax, data, module, module_name, activity):
@@ -826,10 +828,10 @@ class ModelConfig():
     input_dim: int = 1
     input_features: list = field(default_factory=lambda: ["price", "volume", "inverse p/e", "s&p 500"])
     batch_size: int = 4
-    block_size: int = 8  # Reduce block size to focus on shorter sequences
-    embd_dim: int = 8  # Reduce embedding dimension to simplify the model
-    n_layers: int = 4  # Reduce the number of layers for shallower learning
-    n_head: int = 2  # Reduce the number of attention heads for simpler attention mechanism
+    block_size: int = 64  # Reduce block size to focus on shorter sequences
+    embd_dim: int = 64  # Reduce embedding dimension to simplify the model
+    n_layers: int = 16  # Reduce the number of layers for shallower learning
+    n_head: int = 8  # Reduce the number of attention heads for simpler attention mechanism
     loss_fn: Literal['L1', 'MSE'] = "MSE"
 
 def config_to_tuple(config):
@@ -850,6 +852,8 @@ def config_to_tuple(config):
 # autodetect device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+torch.set_float32_matmul_precision('high')
 
 # init models
 model_config_price = ModelConfig(model_name="Model_Price", input_features=["price"])
@@ -965,6 +969,8 @@ for model in model_list:
         # set the model to train mode
         model.train()
 
+        t0 = time.time()
+
         # load batch
         X, Y = data_loader.next_batch()
 
@@ -987,6 +993,16 @@ for model in model_list:
 
           # update weights
           optimizer.step()
+
+          if device.type == 'cuda':
+              torch.cuda.synchronize()
+
+          t1 = time.time()
+          dt = (t1 - t0)
+          prices_per_sec = (data_loader.B * data_loader.T) / dt
+
+          if i % 25 == 0:
+            print(f"batch {i}, prices/second {prices_per_sec}")
 
           # append the training loss
           train_losses.append(train_loss.item())
@@ -1025,7 +1041,7 @@ for model in model_list:
 
 
             # plot tickers if we are at the last batch
-            if i == (total_batches-1):
+            if (i + val_interval) >= total_batches:
               # reshape to 1D for plot
               preds = preds.view(-1).cpu().numpy()
               targets = targets.view(-1).cpu().numpy()
@@ -1078,7 +1094,7 @@ for model in model_list:
 # Print model statistics
 for model_name, stats in model_stats.items():
     print(f"Model Name: {model_name}")
-    
+
     vliser.plot_graph(stats["val_losses"], f"val loss for {model_name}", "iteration", "loss")
 
     print(f"Lowest normalized val loss achieved for {model_name}: {stats['lowest_normalized_val_loss']}")
