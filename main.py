@@ -13,6 +13,7 @@ import requests
 from google.colab import userdata
 from dataclasses import dataclass, field
 import time
+import inspect
 
 
 # Function to plot heatmap for weights
@@ -717,6 +718,28 @@ class FinanceTransformer(nn.Module):
         return preds, loss
 
 
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # start with all of the candidate parameters (that require grad)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=use_fused)
+        return optimizer
 
 
 # class that defines the self attention layers
@@ -952,7 +975,7 @@ for model in model_list:
   warmup_steps = total_batches // 10
   total_steps = total_batches
 
-  # we calculate learning rate based on current batch. 
+  # we calculate learning rate based on current batch.
   # We linearly increase to max_lr and then cosine decay to min_lr. min_lr is reached at last train step.
   def cosine_lr_scheduler(step):
     if step < warmup_steps:
@@ -964,8 +987,8 @@ for model in model_list:
         lr = min_lr + (max_lr - min_lr) * cosine_decay
     return lr
 
-  # define loss function and optimizer
-  optimizer = torch.optim.Adam(model.parameters(), max_lr)
+  # init optimizer
+  optimizer = model.configure_optimizers(weight_decay=1e-2, learning_rate=6e-4, device=device)
 
   # toggle prints, plots and hooks
   prints = False
@@ -998,11 +1021,11 @@ for model in model_list:
         # move batch to correct device
         X = X.to(device)
         Y = Y.to(device)
-        
+
         # if we are on GPU notify user that model is compiling
         if i == 0 and device.type == 'cuda':
           print(f"\nCompiling {model.config.model_name}...")
-        
+
         # get prediction
         if device.type == 'cuda':
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -1135,4 +1158,3 @@ for model_name, stats in model_stats.items():
     # vliser.plot_graph(stats['grad_norms'], f"grad norms for {model_name}", "iteration", "grad norm")
     total_absolute_price_diff = stats['total_absolute_price_diff']
     print(f"Total absolute price difference for {model_name}: {total_absolute_price_diff}")
-
