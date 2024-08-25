@@ -736,7 +736,7 @@ class FinanceTransformer(nn.Module):
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' in device
+        use_fused = fused_available and device.type == 'cuda'
         print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=use_fused)
         return optimizer
@@ -860,19 +860,6 @@ class ModelConfig():
     n_head: int = 8  # Reduce the number of attention heads for simpler attention mechanism
     loss_fn: Literal['L1', 'MSE'] = "MSE"
 
-def config_to_tuple(config):
-    # Convert the ModelConfig object to a tuple, converting lists to tuples
-    return (
-        config.input_dim,
-        tuple(config.input_features),  # Convert list to tuple
-        config.batch_size,
-        config.block_size,
-        config.embd_dim,
-        config.n_layers,
-        config.n_head,
-        config.loss_fn
-    )
-
 # ----------------------------------------------------------------------------------------
 
 # autodetect device
@@ -906,8 +893,9 @@ model_stats = {}
 
 
 # Updated training and validation sets
-train_ticker_list = ['TSLA', 'CVX', 'UNH', 'NKE', 'GOOGL', 'JPM', 'KO']
-train_start_date = "2018-01-01"
+train_ticker_list = ['TSLA', 'CVX', 'UNH', 'NKE', 'GOOGL', 'JPM', 'KO',
+                     'AAPL', 'MSFT', 'AMZN', 'META', 'NFLX', 'NVDA', 'DIS']
+train_start_date = "2016-01-01"
 train_end_date = "2023-01-01"
 
 val_ticker_list = ['META', 'X', 'NFLX', 'CVS', 'ORCL', 'BA', 'DIS', 'MMM', 'CAT', 'ADBE']
@@ -940,6 +928,18 @@ for model in model_list:
   # used to inspect training stability
   grad_norms = []
 
+
+
+
+  # how many batches between each val loss measurement
+  val_interval = 25
+  # record lowest val loss
+  lowest_val_loss = float('inf')
+  lowest_normalized_val_loss = float('inf')
+  total_absolute_price_diff = 0
+
+  epochs = 40
+
   # Instantiate the DataNormalizer class
   normalizer = DataNormalizer(norm_scheme="min_max")
 
@@ -951,22 +951,16 @@ for model in model_list:
 
   data_loader.download_tickers_data(val_ticker_list, val_start_date, val_end_date, split="val")
 
+  # we have a big batch size and a small batch size. Small batches accumulate gradients to simulate larger batches.
+  simulated_batch_size = data_loader.B * data_loader.T * 16
+  real_batch_size = data_loader.B * data_loader.T
 
-  # how many batches between each val loss measurement
-  val_interval = 25
-  # record lowest val loss
-  lowest_val_loss = float('inf')
-  lowest_normalized_val_loss = float('inf')
-  total_absolute_price_diff = 0
-
-  print(f"dataloader.dataPerEpoch: {data_loader.dataPerEpoch}")
-
-  epochs = 40
-
-  batch_size = data_loader.B * data_loader.T
+  grad_accum_steps = simulated_batch_size // real_batch_size
 
   # calculate amount of batches in one epoch
-  total_batches = data_loader.dataPerEpoch*epochs // batch_size
+  total_batches = data_loader.dataPerEpoch*epochs // simulated_batch_size
+
+  print(f"dataloader.dataPerEpoch: {data_loader.dataPerEpoch}")
 
   print(f"total batches: {total_batches}")
 
@@ -1015,58 +1009,62 @@ for model in model_list:
 
         t0 = time.time()
 
-        # load batch
-        X, Y = data_loader.next_batch()
-
-        # move batch to correct device
-        X = X.to(device)
-        Y = Y.to(device)
-
         # if we are on GPU notify user that model is compiling
         if i == 0 and device.type == 'cuda':
           print(f"\nCompiling {model.config.model_name}...")
 
-        # get prediction
-        if device.type == 'cuda':
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        # reset gradients
+        optimizer.zero_grad()
+        loss_accum = 0.0
+
+        for micro_step in range(grad_accum_steps):
+
+            # load batch
+            X, Y = data_loader.next_batch()
+
+            # move batch to correct device
+            X = X.to(device)
+            Y = Y.to(device)
+
+            # get prediction
+            if device.type == 'cuda':
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    preds, train_loss = model(X, Y)
+            else:
                 preds, train_loss = model(X, Y)
-        else:
-            preds, train_loss = model(X, Y)
 
-        if train_loss is not None:
-          # reset gradients
-          optimizer.zero_grad()
+            train_loss = train_loss / grad_accum_steps
+            loss_accum += train_loss.detach()
 
-          # calculate gradients from loss
-          train_loss.backward()
+            # calculate gradients from loss
+            train_loss.backward()
 
-          # clipping the gradients if they get too high values
-          norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # clipping the gradients if they get too high values
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-          # update weights
-          lr = cosine_lr_scheduler(i)
-          for param_group in optimizer.param_groups:
-              param_group['lr'] = lr
-          optimizer.step()
+        # get current learning rate and update weights 
+        lr = cosine_lr_scheduler(i)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        optimizer.step()
 
 
-          if device.type == 'cuda':
-              torch.cuda.synchronize()
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
 
-          t1 = time.time()
-          dt = (t1 - t0)
-          prices_per_sec = (data_loader.B * data_loader.T) / dt
+        t1 = time.time()
+        dt = (t1 - t0)
+        prices_per_sec = simulated_batch_size / dt
 
-          if i % 25 == 0:
-            print(f"\nbatch {i}, lr: {lr}")
-            print(f"batch {i}, prices/second {prices_per_sec}")
+        if i % 25 == 0:
+          print(f"\nbatch {i}, lr: {lr} | prices/second {prices_per_sec}")
 
-          # append the training loss
-          train_losses.append(train_loss.item())
-          grad_norms.append(norm.item())
+        # append the training loss
+        train_losses.append(loss_accum.item())
+        grad_norms.append(norm.item())
 
-          # Update the progress bar
-          pbar.update(1)
+        # Update the progress bar
+        pbar.update(1)
 
         # eval during training
         if i % val_interval == 0:
