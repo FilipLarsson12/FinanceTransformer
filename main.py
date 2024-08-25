@@ -444,7 +444,6 @@ class DataLoader:
             feature_tensor = self.get_feature_tensor(ticker_data, feature_name, start_idx, end_idx, split="train")
             batch_inputs.append(feature_tensor)
 
-
         # Combine features into one tensor if multiple are present
         if len(batch_inputs) > 1:
             batch_inputs = torch.cat(batch_inputs, dim=2)
@@ -761,17 +760,21 @@ class SelfAttentionLayer(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, number_heads, T, head_size)
 
+        # clearer but slower way of computing attention, this way does more read/write accesses to the GPU
+        '''
         # calculating how much the embeddings "care" about one another
         k = k.transpose(-2, -1)
         keyquery_matrix = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
-
         # make it impossible for embeddings to get information from embeddings that comes after
         keyquery_matrix = keyquery_matrix.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-
         keyquery_matrix = F.softmax(keyquery_matrix, dim=-1)
-
         # calculate updated embd_values for the embeddings based on how much information should flow between them
         x = keyquery_matrix @ v # (B, number_heads, T, T) @ (B, number_heads, T, head_size) = (B, number_heads, T, head_size)
+        '''
+
+        # flashattention is faster than above way
+        x = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
         x = x.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # final proj
@@ -894,9 +897,10 @@ api_key = userdata.get('ALPHA_VANTAGE_API_KEY')
 # used for visualizing model activity and model output
 vliser = Visualizer()
 
-
 for model in model_list:
   model.to(device)
+  if device.type == 'cuda':
+      model = torch.compile(model)
 
   # object to track model activities
   modelObserver = ModelObserver(model)
@@ -904,9 +908,6 @@ for model in model_list:
   # get the size of the model
   num_parameters = model.calculate_parameters()
   print(f"Number of parameters in the model: {num_parameters}")
-
-  # define loss function and optimizer
-  optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
   # track losses and grad norms
   train_losses = []
@@ -946,6 +947,26 @@ for model in model_list:
 
   print(f"total batches: {total_batches}")
 
+  max_lr = 1e-3
+  min_lr = 5e-5
+  warmup_steps = total_batches // 10
+  total_steps = total_batches
+
+  # we calculate learning rate based on current batch. 
+  # We linearly increase to max_lr and then cosine decay to min_lr. min_lr is reached at last train step.
+  def cosine_lr_scheduler(step):
+    if step < warmup_steps:
+        lr = max_lr * ((step+1) / warmup_steps)
+    else:
+        decay_steps = total_steps - warmup_steps
+        decay_ratio = (step - warmup_steps) / decay_steps
+        cosine_decay = 0.5 * (1 + np.cos(np.pi * decay_ratio))
+        lr = min_lr + (max_lr - min_lr) * cosine_decay
+    return lr
+
+  # define loss function and optimizer
+  optimizer = torch.optim.Adam(model.parameters(), max_lr)
+
   # toggle prints, plots and hooks
   prints = False
   plots = False
@@ -977,9 +998,17 @@ for model in model_list:
         # move batch to correct device
         X = X.to(device)
         Y = Y.to(device)
-
+        
+        # if we are on GPU notify user that model is compiling
+        if i == 0 and device.type == 'cuda':
+          print(f"\nCompiling {model.config.model_name}...")
+        
         # get prediction
-        preds, train_loss = model(X, Y)
+        if device.type == 'cuda':
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                preds, train_loss = model(X, Y)
+        else:
+            preds, train_loss = model(X, Y)
 
         if train_loss is not None:
           # reset gradients
@@ -992,7 +1021,11 @@ for model in model_list:
           norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
           # update weights
+          lr = cosine_lr_scheduler(i)
+          for param_group in optimizer.param_groups:
+              param_group['lr'] = lr
           optimizer.step()
+
 
           if device.type == 'cuda':
               torch.cuda.synchronize()
@@ -1002,6 +1035,7 @@ for model in model_list:
           prices_per_sec = (data_loader.B * data_loader.T) / dt
 
           if i % 25 == 0:
+            print(f"\nbatch {i}, lr: {lr}")
             print(f"batch {i}, prices/second {prices_per_sec}")
 
           # append the training loss
@@ -1101,3 +1135,4 @@ for model_name, stats in model_stats.items():
     # vliser.plot_graph(stats['grad_norms'], f"grad norms for {model_name}", "iteration", "grad norm")
     total_absolute_price_diff = stats['total_absolute_price_diff']
     print(f"Total absolute price difference for {model_name}: {total_absolute_price_diff}")
+
